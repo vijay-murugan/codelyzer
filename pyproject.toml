@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codelyzer"
+version = "0.1.0"
+authors = [
+  { name="Vijay Murugan", email="vijay.muruganas@tamu.edu" }
+]
+description = "Intelligent code analysis, PR summarization and automated test generation for git repositories"
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "click>=8.1.7",
+    "gitpython>=3.1.41",
+    "langchain>=0.1.11",
+    "langchain-community>=0.0.27",
+    "langchain-text-splitters>=0.0.1",
+    "langchain-ollama>=0.2.0",
+    "langchain-chroma>=0.1.0",
+    "chromadb>=0.4.22",
+    "pydantic>=2.6.3",
+    "python-dotenv>=1.0.1",
+    "pygments>=2.17.2",
+    "networkx>=3.2.1",
+    "langgraph>=0.0.38",
+    "structlog>=24.1.0",
+]
+
+[project.scripts]
+codelyzer = "codelyzer.cli:main"
+
+[tool.hatch.envs.default]
+dependencies = [
+    "pytest>=7.4.4",
+    "pytest-cov>=4.1.0",
+    "black>=24.2.0",
+    "ruff>=0.2.2",
+    "mypy>=1.8.0",
+]
