@@ -122,7 +122,7 @@ class RepositoryIndexer:
             loader = GenericLoader.from_filesystem(
                 str(self.repo_path),
                 glob=f"**/*{ext}",
-                exclude=["**/tests/**", "**/test_*.py", "**/__pycache__/**", "**/.git/**"],
+                exclude=[ "**/__pycache__/**", "**/.git/**"],
                 suffixes=[ext],
                 parser=LanguageParser(language=Language.PYTHON, parser_threshold=1000)
             )

@@ -8,6 +8,7 @@ from codelyzer import __version__
 from codelyzer.diff.parser import GitDiffParser
 from codelyzer.llm.client import get_llm_client
 from codelyzer.retrieval.indexer import RepositoryIndexer
+from codelyzer.testing.generator import generate_tests_for_changes
 from codelyzer.workflow.state import WorkflowState
 from codelyzer.config import settings
 
@@ -151,6 +152,36 @@ def _render_changed_files_summary(structured_diff) -> str:
     return "\n".join(lines)
 
 
+def _render_test_generation_report(state: WorkflowState) -> str:
+    if not state.generated_tests:
+        return "No test generation results available."
+
+    counts = {
+        "generated": 0,
+        "appended": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    lines: list[str] = []
+    for result in state.generated_tests.values():
+        counts[result.status] += 1
+        destination = f" -> {result.test_file_path}" if result.test_file_path else ""
+        detail = f" ({result.reason})" if result.reason else ""
+        partial = " [partial]" if result.partial else ""
+        lines.append(
+            f"- {result.source_file_path}: {result.status}{partial}{destination}{detail}"
+        )
+
+    header = (
+        f"Candidates: {len(state.generated_tests)} | "
+        f"generated: {counts['generated']} | "
+        f"appended: {counts['appended']} | "
+        f"skipped: {counts['skipped']} | "
+        f"failed: {counts['failed']}"
+    )
+    return "\n".join([header, *lines])
+
+
 @click.group()
 @click.version_option(version=__version__)
 def cli():
@@ -167,7 +198,8 @@ def cli():
 @click.argument('repo_path', type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option('--base', default='HEAD', help='Base git reference (default: HEAD)')
 @click.option('--target', help='Target git reference (default: working copy)')
-def analyze(repo_path: Path, base: str, target: str | None):
+@click.option('--generate-tests', is_flag=True, help='Generate pytest tests for changed Python source files')
+def analyze(repo_path: Path, base: str, target: str | None, generate_tests: bool):
     """Analyze repository changes and generate insights."""
     click.echo(f"🔍 Analyzing repository: {repo_path}")
     click.echo(f"📌 Base ref: {base}" + (f" → Target ref: {target}" if target else ""))
@@ -191,6 +223,8 @@ def analyze(repo_path: Path, base: str, target: str | None):
         click.echo(f"❌ Failed to parse diff: {e}", err=True)
         return 1
 
+    indexer: RepositoryIndexer | None = None
+
     # Index repository
     try:
         click.echo("\n📚 Indexing repository code...")
@@ -203,6 +237,22 @@ def analyze(repo_path: Path, base: str, target: str | None):
     except Exception as e:
         click.echo(f"⚠️  Indexing warning: {e}")
         state.add_error(f"Indexing warning: {e}")
+
+    # Find and store existing tests for each changed file
+    try:
+        if indexer is not None:
+            for file_diff in (state.structured_diff.files if state.structured_diff else []):
+                tests = indexer.search_tests_for_file(file_diff.file_path)
+                if tests:
+                    state.existing_tests[str(file_diff.file_path)] = tests
+    except Exception as e:
+        click.echo(f"⚠️  Test search warning: {e}")
+        state.add_error(f"Test search warning: {e}")
+
+    if generate_tests:
+        click.echo("\n🧪 Generating unit tests...")
+        state = generate_tests_for_changes(state, indexer=indexer)
+        click.echo(_render_test_generation_report(state))
 
     summary = state.get_summary()
     click.echo("\n📝 Changed files summary")
@@ -218,8 +268,6 @@ def analyze(repo_path: Path, base: str, target: str | None):
     click.echo(f"- Workflow complete: {summary['complete']}")
 
     click.echo("\n🎉 Analysis complete!")
-
-    # TODO: Run full workflow, generate summary and tests
     return 0
 
 

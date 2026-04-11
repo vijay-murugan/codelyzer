@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel
 import structlog
 
@@ -27,7 +27,7 @@ class WorkflowState:
     # Generated artifacts
     pr_summary: Optional[str] = None
     release_notes: Optional[str] = None
-    generated_tests: Dict[str, str] = field(default_factory=dict)
+    generated_tests: Dict[str, "GeneratedTest"] = field(default_factory=dict)
 
     # Status tracking
     errors: List[str] = field(default_factory=list)
@@ -52,12 +52,17 @@ class WorkflowState:
 
     def get_summary(self) -> Dict[str, Any]:
         """Get summary of current state."""
+        generated_count = sum(
+            1
+            for result in self.generated_tests.values()
+            if result.status in {"generated", "appended"}
+        )
         return {
             "repo_path": str(self.repo_path),
             "files_changed": self.structured_diff.total_files_changed if self.structured_diff else 0,
             "context_retrieved": len(self.code_context),
             "tests_found": len(self.existing_tests),
-            "tests_generated": len(self.generated_tests),
+            "tests_generated": generated_count,
             "errors": len(self.errors),
             "complete": self.is_complete()
         }
@@ -80,7 +85,10 @@ class ReleaseNote(BaseModel):
 
 
 class GeneratedTest(BaseModel):
-    file_path: str
+    source_file_path: str
     test_file_path: str
     test_code: str
     test_names: List[str]
+    status: Literal["generated", "appended", "skipped", "failed"]
+    reason: Optional[str] = None
+    partial: bool = False
