@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import structlog
 
 from codelyzer.diff.parser import StructuredDiff
@@ -28,6 +28,15 @@ class WorkflowState:
     pr_summary: Optional[str] = None
     release_notes: Optional[str] = None
     generated_tests: Dict[str, "GeneratedTest"] = field(default_factory=dict)
+    test_run_report: Dict[str, Any] = field(default_factory=dict)
+    coverage_report: Dict[str, Any] = field(default_factory=dict)
+    review_findings: List[Dict[str, Any]] = field(default_factory=list)
+    research_suggestions: List[Dict[str, Any]] = field(default_factory=list)
+    pre_generation_research: List[Dict[str, Any]] = field(default_factory=list)
+    refinement_fixes: List[Dict[str, Any]] = field(default_factory=list)
+    removed_tests: List[Dict[str, Any]] = field(default_factory=list)
+    final_validation_status: Optional[str] = None
+    qa_report_path: Optional[str] = None
 
     # Status tracking
     errors: List[str] = field(default_factory=list)
@@ -57,12 +66,22 @@ class WorkflowState:
             for result in self.generated_tests.values()
             if result.status in {"generated", "appended"}
         )
+        qa_findings_count = len(self.review_findings)
+        research_count = len(self.research_suggestions)
+        fix_count = len(self.refinement_fixes)
+        removed_count = len(self.removed_tests)
         return {
             "repo_path": str(self.repo_path),
             "files_changed": self.structured_diff.total_files_changed if self.structured_diff else 0,
             "context_retrieved": len(self.code_context),
             "tests_found": len(self.existing_tests),
             "tests_generated": generated_count,
+            "qa_findings": qa_findings_count,
+            "research_suggestions": research_count,
+            "fixes_applied": fix_count,
+            "tests_removed": removed_count,
+            "final_validation_status": self.final_validation_status,
+            "qa_report_path": self.qa_report_path,
             "errors": len(self.errors),
             "complete": self.is_complete()
         }
@@ -92,3 +111,4 @@ class GeneratedTest(BaseModel):
     status: Literal["generated", "appended", "skipped", "failed"]
     reason: Optional[str] = None
     partial: bool = False
+    trace_context: Dict[str, Any] = Field(default_factory=dict)

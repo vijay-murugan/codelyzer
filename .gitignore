@@ -70,3 +70,4 @@ dmypy.json
 .cache/codelyzer/
 checkpoints/
 *.db
+.env.example
