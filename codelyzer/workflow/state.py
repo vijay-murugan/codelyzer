@@ -37,6 +37,7 @@ class WorkflowState:
     removed_tests: List[Dict[str, Any]] = field(default_factory=list)
     final_validation_status: Optional[str] = None
     qa_report_path: Optional[str] = None
+    generated_requirements_path: Optional[str] = None
 
     # Status tracking
     errors: List[str] = field(default_factory=list)

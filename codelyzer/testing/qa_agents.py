@@ -4,6 +4,7 @@ import ast
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,50 @@ logger = structlog.get_logger(__name__)
 _SUMMARY_LINE_RE = re.compile(r"=+\s+(\d+)\s+(\w+)")
 _COLLECTED_RE = re.compile(r"collected\s+(\d+)\s+items?")
 _COVERAGE_TOTAL_RE = re.compile(r"TOTAL\s+\d+\s+\d+\s+(\d+)%")
+
+# Module import name → PyPI package name (for common cases where they differ)
+_IMPORT_TO_PYPI: dict[str, str] = {
+    "cv2": "opencv-python",
+    "PIL": "Pillow",
+    "sklearn": "scikit-learn",
+    "yaml": "PyYAML",
+    "bs4": "beautifulsoup4",
+    "git": "gitpython",
+    "dotenv": "python-dotenv",
+    "attr": "attrs",
+    "dateutil": "python-dateutil",
+    "jose": "python-jose",
+    "jwt": "PyJWT",
+    "serial": "pyserial",
+    "usb": "pyusb",
+    "skimage": "scikit-image",
+    "docx": "python-docx",
+    "pptx": "python-pptx",
+    "psycopg2": "psycopg2-binary",
+    "grpc": "grpcio",
+    "Crypto": "pycryptodome",
+    "nacl": "PyNaCl",
+    "langchain_core": "langchain-core",
+    "langchain_community": "langchain-community",
+    "langchain_ollama": "langchain-ollama",
+    "langchain_chroma": "langchain-chroma",
+    "langchain_text_splitters": "langchain-text-splitters",
+}
+
+# Known third-party packages where import name == PyPI name
+_KNOWN_THIRD_PARTY: set[str] = {
+    "requests", "flask", "django", "fastapi", "numpy", "pandas", "scipy",
+    "matplotlib", "seaborn", "plotly", "torch", "tensorflow", "boto3",
+    "botocore", "redis", "celery", "sqlalchemy", "alembic", "pydantic",
+    "httpx", "aiohttp", "urllib3", "pymongo", "psutil", "click", "typer",
+    "rich", "tqdm", "structlog", "loguru", "jinja2", "gunicorn", "uvicorn",
+    "starlette", "marshmallow", "dlib", "transformers", "datasets",
+    "networkx", "sympy", "lxml", "paramiko", "scrapy", "selenium",
+    "hypothesis", "freezegun", "responses", "moto", "toml", "tomli",
+    "msgpack", "cryptography", "bcrypt", "passlib", "arrow", "pendulum",
+    "pytz", "watchdog", "schedule", "pygments", "chromadb", "langchain",
+    "langgraph", "pytest", "openpyxl", "xlrd",
+}
 
 
 @dataclass
@@ -53,6 +98,141 @@ def _detect_dependency_file(repo_path: Path) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def _extract_top_level_imports(file_path: Path) -> set[str]:
+    """Parse a Python file via AST and return top-level module names from import statements."""
+    try:
+        source = file_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError):
+        return set()
+
+    modules: set[str] = set()
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                modules.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.level == 0:  # absolute imports only
+                modules.add(node.module.split(".")[0])
+    return modules
+
+
+def _is_project_internal(module_name: str, repo_path: Path) -> bool:
+    """Check if a module name resolves to a package or file inside the repo."""
+    candidate_dir = repo_path / module_name
+    if candidate_dir.is_dir() and (candidate_dir / "__init__.py").exists():
+        return True
+    candidate_file = repo_path / f"{module_name}.py"
+    if candidate_file.is_file():
+        return True
+    return False
+
+
+def _parse_existing_requirements(req_path: Path) -> set[str]:
+    """Parse normalized package names from an existing requirements file."""
+    if not req_path.exists():
+        return set()
+    names: set[str] = set()
+    try:
+        for line in req_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+                continue
+            pkg = re.split(r"[><=!~;\[]", stripped, maxsplit=1)[0].strip()
+            if pkg:
+                names.add(pkg.lower())
+    except OSError:
+        pass
+    return names
+
+
+def _resolve_pypi_name(module_name: str) -> str | None:
+    """Map a Python import name to its PyPI package name."""
+    if module_name in _IMPORT_TO_PYPI:
+        return _IMPORT_TO_PYPI[module_name]
+    if module_name in _KNOWN_THIRD_PARTY:
+        return module_name
+    # For unknown modules that passed stdlib/project-internal filtering,
+    # assume import name == package name.
+    return module_name
+
+
+def generate_test_requirements(state: "WorkflowState") -> Path | None:
+    """Scan generated tests and source files for imports; create or append to requirements.txt.
+
+    If a requirements file already exists in the repo, new dependencies are appended.
+    Otherwise a new ``requirements.txt`` is created at the repo root.
+
+    Returns the path to the requirements file, or ``None`` if no generated tests to scan.
+    """
+    files_to_scan: set[Path] = set()
+    for result in state.generated_tests.values():
+        if result.status not in {"generated", "appended"}:
+            continue
+        if result.test_file_path:
+            tp = Path(result.test_file_path)
+            if tp.exists():
+                files_to_scan.add(tp)
+        src = Path(state.repo_path) / result.source_file_path
+        if src.exists():
+            files_to_scan.add(src)
+
+    if not files_to_scan:
+        logger.info("generate_test_requirements: no files to scan")
+        return None
+
+    # Extract all imports from test + source files
+    all_imports: set[str] = set()
+    for fpath in files_to_scan:
+        all_imports.update(_extract_top_level_imports(fpath))
+
+    # Filter out stdlib and project-internal modules
+    stdlib_names: set[str] = getattr(sys, "stdlib_module_names", set())
+    third_party = {
+        name for name in all_imports
+        if name not in stdlib_names and not _is_project_internal(name, state.repo_path)
+    }
+
+    # Map to PyPI package names
+    pypi_packages: set[str] = set()
+    for mod in third_party:
+        pkg = _resolve_pypi_name(mod)
+        if pkg:
+            pypi_packages.add(pkg)
+
+    # Always include test runner dependencies
+    pypi_packages.add("pytest")
+    pypi_packages.add("pytest-cov")
+
+    # Find existing or decide on new requirements path
+    existing_req = _detect_dependency_file(state.repo_path)
+    req_path = existing_req if existing_req is not None else state.repo_path / "requirements.txt"
+
+    # Avoid duplicating already-listed packages
+    existing_packages = _parse_existing_requirements(req_path)
+    new_packages = sorted(pkg for pkg in pypi_packages if pkg.lower() not in existing_packages)
+
+    if not new_packages:
+        logger.info("All detected dependencies already present in requirements", path=str(req_path))
+        state.generated_requirements_path = str(req_path)
+        return req_path
+
+    # Append new packages
+    req_path.parent.mkdir(parents=True, exist_ok=True)
+    with req_path.open("a", encoding="utf-8") as f:
+        f.write("\n# Auto-detected dependencies for generated tests (codelyzer)\n")
+        for pkg in new_packages:
+            f.write(f"{pkg}\n")
+
+    logger.info(
+        "Appended test dependencies to requirements",
+        path=str(req_path),
+        new_packages=new_packages,
+    )
+    state.generated_requirements_path = str(req_path)
+    return req_path
 
 
 def _detect_pythonpath_override(repo_path: Path) -> str | None:

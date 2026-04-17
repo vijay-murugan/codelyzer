@@ -10,6 +10,7 @@ from codelyzer.llm.client import get_llm_client
 from codelyzer.retrieval.indexer import RepositoryIndexer
 from codelyzer.testing.generator import generate_tests_for_changes, summarize_test_generation_preflight
 from codelyzer.testing.qa_agents import (
+    generate_test_requirements,
     research_before_generation_agent,
     run_integrated_generation_validation,
     run_qa_agents,
@@ -326,6 +327,11 @@ def analyze(
         click.echo("\n🧪 Generating unit tests...")
         state = generate_tests_for_changes(state, indexer=indexer)
         click.echo(_render_test_generation_report(state))
+        req_path = generate_test_requirements(state)
+        if req_path:
+            click.echo(f"📋 Requirements updated: {req_path}")
+        else:
+            click.echo("📋 No new dependencies detected for requirements.txt")
         if auto_validate_tests:
             click.echo("\n🛡️ Auto-validating generated tests (review generated tests → fix → pytest + coverage → prune if needed → research + report)...")
             default_report_path = repo_path / "reports" / "qa_report.md"
