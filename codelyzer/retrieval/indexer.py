@@ -119,15 +119,28 @@ class RepositoryIndexer:
         documents = []
 
         for ext in file_types:
-            loader = GenericLoader.from_filesystem(
-                str(self.repo_path),
-                glob=f"**/*{ext}",
-                exclude=[ "**/__pycache__/**", "**/.git/**"],
-                suffixes=[ext],
-                parser=LanguageParser(language=Language.PYTHON, parser_threshold=1000)
-            )
-            docs = loader.load()
-            documents.extend(docs)
+            for py_file in sorted(self.repo_path.rglob(f"*{ext}")):
+                rel = py_file.relative_to(self.repo_path)
+                skip = False
+                for part in rel.parts:
+                    if part in {
+                        "__pycache__", ".git", ".venv", "venv",
+                        ".codelyzer_venv", "node_modules", ".tox",
+                        ".eggs", ".mypy_cache", "build", "dist",
+                    } or part.endswith(".egg-info"):
+                        skip = True
+                        break
+                if skip:
+                    continue
+                try:
+                    content = py_file.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError) as exc:
+                    logger.warning("Skipping unreadable file", file=str(rel), error=str(exc))
+                    continue
+                from langchain_core.documents import Document
+                documents.append(
+                    Document(page_content=content, metadata={"source": str(rel)})
+                )
 
         logger.info("Loaded source files", count=len(documents))
 
