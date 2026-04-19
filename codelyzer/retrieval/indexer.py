@@ -19,6 +19,24 @@ logger = structlog.get_logger(__name__)
 class RepositoryIndexer:
     """Semantic code indexer for git repositories using vector database."""
 
+    DEFAULT_EXCLUDE_DIRS = {
+        ".git",
+        ".hg",
+        ".svn",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".nox",
+        ".venv",
+        "venv",
+        "env",
+        "node_modules",
+        "dist",
+        "build",
+    }
+
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path.resolve()
         self.repository_id = self._get_repo_id()
@@ -29,6 +47,36 @@ class RepositoryIndexer:
         )
         self.vector_store = None
         self._initialize_store()
+
+    def _list_indexable_files(self, file_types: List[str]) -> List[Path]:
+        """Return repo files to index, excluding ignored and generated directories."""
+        normalized_types = set(file_types)
+        files: list[Path] = []
+
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            candidates = [Path(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+        except Exception:
+            candidates = [
+                path.relative_to(self.repo_path)
+                for path in self.repo_path.rglob("*")
+                if path.is_file()
+            ]
+
+        for relative_path in candidates:
+            if relative_path.suffix not in normalized_types:
+                continue
+            if any(part in self.DEFAULT_EXCLUDE_DIRS for part in relative_path.parts):
+                continue
+            files.append(relative_path)
+
+        return files
 
     def _get_repo_id(self) -> str:
         """Generate unique identifier for repository."""
@@ -107,7 +155,7 @@ class RepositoryIndexer:
 
     def index_repository(self, file_types: List[str] = None) -> int:
         """Index all code files in the repository."""
-        existing_count = self._existing_embedding_count()
+        existing_count = 0
         if existing_count > 0:
             self.reused_existing_index = True
             logger.info("Using existing repository embeddings", vectors=existing_count)
@@ -117,12 +165,12 @@ class RepositoryIndexer:
             file_types = ['.py']
 
         documents = []
-
-        for ext in file_types:
+        files_to_index = self._list_indexable_files(file_types)
+        for relative_path in files_to_index:
+            ext = relative_path.suffix
             loader = GenericLoader.from_filesystem(
                 str(self.repo_path),
-                glob=f"**/*{ext}",
-                exclude=[ "**/__pycache__/**", "**/.git/**"],
+                glob=str(relative_path),
                 suffixes=[ext],
                 parser=LanguageParser(language=Language.PYTHON, parser_threshold=1000)
             )

@@ -200,9 +200,14 @@ def _build_generation_prompt() -> ChatPromptTemplate:
                 "system",
                 "You generate pytest unit tests for changed Python code. "
                 "Return only valid Python test code, with no markdown fences and no explanation. "
-                "Prefer unit tests over integration tests. "
+                "Only add unit tests that covers the entire code"
+                "Import the models from the source code directly to create the Mock structures. The models will also be part of the diff with the file name models.py"
+                "All the imports required for the tests will be part of the diff and should be used to create the test file."
+                "Derive imports from the folder under src. Do not include src in the import path. For example, if the changed file is src/utils/helpers.py, import from utils.helpers in the test file."
+                "Import pytest and any necessary testing utilities, but do not add extra dependencies that are not already in the diff. "
                 "Add mocks or monkeypatching when code touches I/O, subprocesses, network, databases, or environment. "
                 "Cover newly added branches, changed return values, changed error handling, and visible public behavior. "
+                "Do not add any comments or explanations"
                 "If context is incomplete, emit the smallest runnable pytest scaffold and mark it skipped."
             ),
             (

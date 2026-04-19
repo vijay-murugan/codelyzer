@@ -31,13 +31,38 @@ class BaseLLMClient(ABC):
 
 class OllamaClient(BaseLLMClient):
     def __init__(self):
-        selected_model = self._select_available_model(settings.ollama_model)
+        # If an API key is configured we assume the cloud/remote Ollama service
+        # should be used and therefore prefer the configured model without
+        # probing local `ollama` binaries. Otherwise, fall back to checking
+        # locally-installed models.
+        if getattr(settings, "ollama_api_key", None):
+
+            selected_model = settings.ollama_model
+            print(f"Selected Ollama model: {selected_model}")
+        else:
+            selected_model = self._select_available_model(settings.ollama_model)
+        
+        client_kwargs = {}
+        api_key = getattr(settings, "ollama_api_key", None)
+        print(f"Using Ollama API key: {api_key}")
+        if api_key:
+            # Pass API key as a Bearer token header to the underlying httpx client.
+            client_kwargs["headers"] = {"Authorization": f"Bearer {api_key}"}
+
         self.model = ChatOllama(
             model=selected_model,
             base_url=settings.ollama_base_url,
-            temperature=0.1
+            temperature=0.1,
+            client_kwargs=client_kwargs or None,
         )
-        logger.info("Initialized Ollama LLM client", base_url=settings.ollama_base_url, model=selected_model)
+
+        print(f"Initialized Ollama LLM client with model '{selected_model}' at '{settings.ollama_base_url}'")
+        logger.info(
+            "Initialized Ollama LLM client",
+            base_url=settings.ollama_base_url,
+            model=selected_model,
+            using_api_key=bool(api_key),
+        )
 
     def _list_local_models(self) -> list[str]:
         try:
