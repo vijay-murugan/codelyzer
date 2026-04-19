@@ -155,7 +155,7 @@ class RepositoryIndexer:
 
     def index_repository(self, file_types: List[str] = None) -> int:
         """Index all code files in the repository."""
-        existing_count = 0
+        existing_count = self._existing_embedding_count()
         if existing_count > 0:
             self.reused_existing_index = True
             logger.info("Using existing repository embeddings", vectors=existing_count)
