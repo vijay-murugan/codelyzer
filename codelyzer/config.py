@@ -11,12 +11,13 @@ class Settings(BaseSettings):
     )
 
     # LLM Configuration
-    ollama_base_url: str = "http://localhost:11434"
+    # ollama_base_url: str = "http://localhost:11434"
     ollama_api_key: str = ""
     ollama_model: str = "gemma4"
 
     # Retrieval Configuration
     chroma_persist_directory: Path = Path.home() / ".cache" / "codelyzer" / "chroma"
+    embedding_base_url: str = "http://localhost:11434"
     embedding_model: str = "nomic-embed-text"
     indexing_batch_size: int = 2000
     chunk_size: int = 1024

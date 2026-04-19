@@ -42,7 +42,7 @@ class RepositoryIndexer:
         self.repository_id = self._get_repo_id()
         self.reused_existing_index = False
         self.embeddings = OllamaEmbeddings(
-            base_url=settings.ollama_base_url,
+            base_url=settings.embedding_base_url,
             model=settings.embedding_model,
         )
         self.vector_store = None
