@@ -37,7 +37,7 @@ class OllamaClient(BaseLLMClient):
             base_url=settings.ollama_base_url,
             temperature=0.1
         )
-        logger.info("Initialized Ollama LLM client", base_url=settings.ollama_base_url, model=selected_model)
+        logger.info("Initialized Ollama LLM client", model=selected_model)
 
     def _list_local_models(self) -> list[str]:
         try:
