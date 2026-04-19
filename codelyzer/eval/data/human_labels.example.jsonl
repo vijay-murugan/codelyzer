@@ -1,0 +1,2 @@
+{"case_id":"example-001","surface":"pr_summary","input_refs":{"repo_path":"/tmp/sample","base":"main","target":"feature-x"},"summary_faithfulness_1_5":4,"summary_usefulness_1_5":3,"notes":"Annotator: replace with real runs; use schema fields for calibration vs LLM-as-judge."}
+{"case_id":"example-002","surface":"generated_tests","input_refs":{"repo_path":"/tmp/sample","base":"HEAD","target":null,"flags":["--generate-tests"]},"test_usefulness_1_5":3,"notes":"Placeholder row for test-file quality rubric."}

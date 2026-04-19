@@ -38,6 +38,11 @@ dependencies = [
 [project.scripts]
 codelyzer = "codelyzer.cli:main"
 
+[project.optional-dependencies]
+eval = [
+    "langsmith>=0.1.120",
+]
+
 [tool.hatch.envs.default]
 dependencies = [
     "pytest>=7.4.4",

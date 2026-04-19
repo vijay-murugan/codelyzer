@@ -2,11 +2,10 @@ import click
 import structlog
 from pathlib import Path
 from dotenv import load_dotenv
-from langchain_core.prompts import ChatPromptTemplate
 
 from codelyzer import __version__
+from codelyzer.changed_files_summary import render_changed_files_summary
 from codelyzer.diff.parser import GitDiffParser
-from codelyzer.llm.client import get_llm_client
 from codelyzer.retrieval.indexer import RepositoryIndexer
 from codelyzer.testing.generator import generate_tests_for_changes, summarize_test_generation_preflight
 from codelyzer.testing.qa_agents import (
@@ -14,147 +13,11 @@ from codelyzer.testing.qa_agents import (
     run_integrated_generation_validation,
     run_qa_agents,
 )
+from codelyzer.eval.batch import eval_cli
 from codelyzer.workflow.state import WorkflowState
-from codelyzer.config import settings
 
 load_dotenv()
 logger = structlog.get_logger(__name__)
-
-
-def _extract_changed_examples(file_diff, max_examples: int = 3) -> tuple[list[str], list[str]]:
-    added: list[str] = []
-    removed: list[str] = []
-    for hunk in file_diff.hunks:
-        for raw_line in hunk.content.splitlines():
-            if raw_line.startswith('+') and len(added) < max_examples:
-                text = raw_line[1:].strip()
-                if text:
-                    added.append(text)
-            elif raw_line.startswith('-') and len(removed) < max_examples:
-                text = raw_line[1:].strip()
-                if text:
-                    removed.append(text)
-    return added, removed
-
-
-def _build_file_diff_payload(file_diff, max_chars_per_file: int) -> str:
-    hunk_chunks: list[str] = []
-    for idx, hunk in enumerate(file_diff.hunks, start=1):
-        hunk_chunks.append(
-            f"@@ hunk {idx} -{hunk.start_line_old},{hunk.lines_old} +{hunk.start_line_new},{hunk.lines_new}\n"
-            f"{hunk.content}"
-        )
-
-    file_payload = "\n".join(hunk_chunks)
-    if len(file_payload) > max_chars_per_file:
-        return file_payload[:max_chars_per_file] + "\n[TRUNCATED]"
-    return file_payload
-
-
-def _summarize_file_with_llm(llm, file_diff, max_chars_per_file: int) -> tuple[str, str, str]:
-    llm_prompt = ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are an expert software reviewer. Explain code changes precisely from diff evidence only. "
-            "Avoid generic phrases like 'improves maintainability' unless you justify with concrete diff details."
-        ),
-        (
-            "human",
-            "File path: {file_path}\n"
-            "Change type: {change_type}\n"
-            "Git diff:\n{diff_payload}\n\n"
-            "Return exactly three lines, one sentence each:\n"
-            "What changed: ...\n"
-            "Why it was changed: ...\n"
-            "What it does: ..."
-        ),
-    ])
-
-    diff_payload = _build_file_diff_payload(file_diff, max_chars_per_file)
-    response = llm.generate_text(
-        llm_prompt,
-        {
-            "file_path": str(file_diff.file_path),
-            "change_type": file_diff.change_type,
-            "diff_payload": diff_payload,
-        },
-    )
-    if not response or not response.strip():
-        raise RuntimeError("LLM returned an empty summary")
-
-    extracted = {
-        "what changed": "",
-        "why it was changed": "",
-        "what it does": "",
-    }
-    for line in response.splitlines():
-        stripped = line.strip().lstrip("- ").strip()
-        lower = stripped.lower()
-        for key in extracted:
-            prefix = f"{key}:"
-            if lower.startswith(prefix):
-                extracted[key] = stripped[len(prefix):].strip()
-
-    if not extracted["what changed"]:
-        raise RuntimeError("LLM response missing 'What changed' field")
-    if not extracted["why it was changed"]:
-        raise RuntimeError("LLM response missing 'Why it was changed' field")
-    if not extracted["what it does"]:
-        raise RuntimeError("LLM response missing 'What it does' field")
-
-    return extracted["what changed"], extracted["why it was changed"], extracted["what it does"]
-
-
-def _fallback_file_summary(file_diff, error_message: str) -> tuple[str, str, str]:
-    added, removed = _extract_changed_examples(file_diff)
-    added_examples = "; ".join(added) if added else "none"
-    removed_examples = "; ".join(removed) if removed else "none"
-    change_count = len(file_diff.hunks)
-
-    what_changed = (
-        f"{file_diff.change_type} with {change_count} hunks; added examples: {added_examples}; "
-        f"removed examples: {removed_examples}."
-    )
-    why_changed = f"Could not generate LLM rationale for this file ({error_message})."
-    what_it_does = "Applies the shown line-level modifications in this file."
-    return what_changed, why_changed, what_it_does
-
-
-def _render_changed_files_summary(structured_diff) -> str:
-    if not structured_diff or not structured_diff.files:
-        return "No changed files were detected."
-    max_files = max(1, settings.summary_max_files)
-    max_chars_per_file = max(500, settings.summary_max_chars_per_file)
-    llm = None
-    try:
-        llm = get_llm_client()
-    except Exception as exc:
-        logger.warning("LLM client unavailable, using per-file fallback summaries", error=str(exc))
-
-    lines: list[str] = []
-    for file_diff in structured_diff.files[:max_files]:
-        if llm is not None:
-            try:
-                what_changed, why_changed, effect = _summarize_file_with_llm(
-                    llm,
-                    file_diff,
-                    max_chars_per_file,
-                )
-            except Exception as exc:
-                what_changed, why_changed, effect = _fallback_file_summary(file_diff, str(exc))
-        else:
-            what_changed, why_changed, effect = _fallback_file_summary(file_diff, "LLM client not available")
-
-        lines.append(f"- {file_diff.file_path}")
-        lines.append(f"  What changed: {what_changed}")
-        lines.append(f"  Why it was changed: {why_changed}")
-        lines.append(f"  What it does: {effect}")
-
-    if len(structured_diff.files) > max_files:
-        omitted = len(structured_diff.files) - max_files
-        lines.append(f"- [omitted {omitted} files due to summary_max_files limit]")
-
-    return "\n".join(lines)
 
 
 def _render_test_generation_report(state: WorkflowState) -> str:
@@ -205,6 +68,8 @@ def _render_qa_report_summary(state: WorkflowState) -> str:
         f"- Bootstrap status: {bootstrap.get('status', 'not-run')}",
         f"- Bootstrap deps: {bootstrap.get('dependency_file', 'none')}",
         f"- Bootstrap PYTHONPATH: {bootstrap.get('pythonpath_override', 'none')}",
+        f"- System Python (no venv): {bootstrap.get('system_python', False)}",
+        f"- Coverage scope: {state.coverage_scope}",
         f"- Coverage status: {coverage.get('status', 'unknown')}",
         f"- Coverage total: {coverage.get('total_percent', 'n/a')}%",
         f"- Review findings: {len(state.review_findings)}",
@@ -229,6 +94,9 @@ def cli():
     pass
 
 
+cli.add_command(eval_cli)
+
+
 @cli.command()
 @click.argument('repo_path', type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option('--base', default='HEAD', help='Base git reference (default: HEAD)')
@@ -239,6 +107,23 @@ def cli():
 @click.option('--qa-report-path', type=click.Path(path_type=Path), help='Markdown output path for QA report')
 @click.option('--cov-target', default='codelyzer', help='Coverage target passed to pytest --cov')
 @click.option('--min-coverage', type=int, help='Optional minimum required total coverage percent')
+@click.option(
+    '--coverage-scope',
+    type=click.Choice(['runtime', 'full_source'], case_sensitive=False),
+    default='runtime',
+    show_default=True,
+    help='Coverage accounting mode: runtime (default) or full_source (count unexecuted files in cov target).',
+)
+@click.option(
+    '--pytest-target',
+    multiple=True,
+    help='Path(s) for pytest when no generated test files define the run set (repeatable); default is tests.',
+)
+@click.option(
+    '--qa-system-python',
+    is_flag=True,
+    help='Run pytest with the current Python (sys.executable); skip .codelyzer_venv and pip install.',
+)
 def analyze(
     repo_path: Path,
     base: str,
@@ -249,23 +134,30 @@ def analyze(
     qa_report_path: Path | None,
     cov_target: str,
     min_coverage: int | None,
+    coverage_scope: str,
+    pytest_target: tuple[str, ...],
+    qa_system_python: bool,
 ):
     """Analyze repository changes and generate insights."""
     click.echo(f"🔍 Analyzing repository: {repo_path}")
     click.echo(f"📌 Base ref: {base}" + (f" → Target ref: {target}" if target else ""))
 
+    pytest_targets = [p.strip() for p in pytest_target if p.strip()]
     # Initialize workflow state
     state = WorkflowState(
         repo_path=repo_path,
         base_ref=base,
-        target_ref=target
+        target_ref=target,
+        pytest_targets=pytest_targets if pytest_targets else None,
+        use_system_python=qa_system_python,
+        coverage_scope="full_source" if str(coverage_scope).lower() == "full_source" else "runtime",
     )
 
     # Parse git diff
     try:
         parser = GitDiffParser(repo_path)
         state.structured_diff = parser.parse_diff(base, target)
-        state.pr_summary = _render_changed_files_summary(state.structured_diff)
+        state.pr_summary = render_changed_files_summary(state.structured_diff)
 
         click.echo(f"✅ Parsed diff: {state.structured_diff.total_files_changed} files changed, "
                    f"+{state.structured_diff.total_insertions} -{state.structured_diff.total_deletions}")
@@ -335,6 +227,7 @@ def analyze(
                 report_path=report_path,
                 cov_target=cov_target,
                 min_coverage=min_coverage,
+                coverage_scope=state.coverage_scope,
             )
             click.echo(_render_qa_report_summary(state))
     elif auto_validate_tests:
@@ -349,6 +242,7 @@ def analyze(
             report_path=report_path,
             cov_target=cov_target,
             min_coverage=min_coverage,
+            coverage_scope=state.coverage_scope,
         )
         click.echo(_render_qa_report_summary(state))
 

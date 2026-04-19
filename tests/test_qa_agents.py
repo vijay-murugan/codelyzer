@@ -1,10 +1,13 @@
 from pathlib import Path
+import pytest
 
 from codelyzer.testing.qa_agents import (
     QARunArtifacts,
     _detect_dependency_file,
     _detect_pythonpath_override,
+    _pytest_target_paths,
     _remove_vacuous_tests_from_content,
+    run_test_and_coverage,
     parse_coverage_output,
     parse_test_runner_output,
     write_qa_markdown_report,
@@ -14,6 +17,39 @@ from codelyzer.workflow.state import GeneratedTest, WorkflowState
 
 def _state(tmp_path: Path) -> WorkflowState:
     return WorkflowState(repo_path=tmp_path, base_ref="HEAD", target_ref=None)
+
+
+def test_pytest_target_paths_default_tests(tmp_path: Path) -> None:
+    state = WorkflowState(repo_path=tmp_path, base_ref="HEAD", target_ref=None)
+    assert _pytest_target_paths(state) == ["tests"]
+
+
+def test_pytest_target_paths_uses_configured_when_no_generated(tmp_path: Path) -> None:
+    state = WorkflowState(
+        repo_path=tmp_path,
+        base_ref="HEAD",
+        target_ref=None,
+        pytest_targets=["app/tests", "  "],
+    )
+    assert _pytest_target_paths(state) == ["app/tests"]
+
+
+def test_pytest_target_paths_generated_wins_over_configured(tmp_path: Path) -> None:
+    state = WorkflowState(
+        repo_path=tmp_path,
+        base_ref="HEAD",
+        target_ref=None,
+        pytest_targets=["app/tests"],
+    )
+    state.generated_tests["m.py"] = GeneratedTest(
+        source_file_path="m.py",
+        test_file_path=str(tmp_path / "tests" / "test_m.py"),
+        test_code="def test_ok():\n    assert 1\n",
+        test_names=["test_ok"],
+        status="generated",
+        partial=False,
+    )
+    assert _pytest_target_paths(state) == [str(tmp_path / "tests" / "test_m.py")]
 
 
 def test_remove_vacuous_tests_from_content() -> None:
@@ -87,8 +123,9 @@ def test_write_qa_markdown_report_includes_refinement_sections(tmp_path: Path) -
         "bootstrap": {
             "status": "ok",
             "venv_path": str(tmp_path / ".codelyzer_venv"),
+            "system_python": False,
             "dependency_file": str(tmp_path / "backend" / "requirements-dev.txt"),
-            "pythonpath_override": "backend",
+            "pythonpath_override": ".",
         },
     }
     state.coverage_report = {"status": "available", "total_percent": 75, "low_coverage_files": []}
@@ -111,7 +148,8 @@ def test_write_qa_markdown_report_includes_refinement_sections(tmp_path: Path) -
     assert "## Removed Tests" in text
     assert "## Generated test review" in text
     assert "### Test Environment Bootstrap" in text
-    assert "PYTHONPATH override: backend" in text
+    assert "System Python (no venv): False" in text
+    assert "PYTHONPATH override: ." in text
 
 
 def test_detect_dependency_file_prefers_backend_requirements(tmp_path: Path) -> None:
@@ -122,7 +160,86 @@ def test_detect_dependency_file_prefers_backend_requirements(tmp_path: Path) -> 
     assert _detect_dependency_file(tmp_path) == req
 
 
-def test_detect_pythonpath_override_for_backend_layout(tmp_path: Path) -> None:
-    app_dir = tmp_path / "backend" / "app"
+def test_detect_pythonpath_override_for_app_layout(tmp_path: Path) -> None:
+    app_dir = tmp_path / "app"
     app_dir.mkdir(parents=True, exist_ok=True)
-    assert _detect_pythonpath_override(tmp_path) == "backend"
+    assert _detect_pythonpath_override(tmp_path) == "."
+
+
+def test_detect_pythonpath_override_none_without_app_dir(tmp_path: Path) -> None:
+    assert _detect_pythonpath_override(tmp_path) is None
+
+
+def test_bootstrap_system_python_uses_sys_executable(tmp_path: Path) -> None:
+    from codelyzer.testing import qa_agents as qa
+
+    info = qa._bootstrap_test_environment(tmp_path, 120, use_system_python=True)
+    assert info["status"] == "ok"
+    assert info["system_python"] is True
+    assert info["venv_python"] == __import__("sys").executable
+    assert info["install_command"] == []
+
+
+def test_run_test_and_coverage_runtime_has_no_cov_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from codelyzer.testing import qa_agents as qa
+
+    state = WorkflowState(repo_path=tmp_path, base_ref="HEAD", target_ref=None, coverage_scope="runtime")
+    seen_cmd: list[str] = []
+
+    def fake_bootstrap(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "venv_python": "python3",
+            "pythonpath_override": None,
+            "system_python": False,
+        }
+
+    def fake_run(cmd: list[str], **kwargs: object):  # type: ignore[no-untyped-def]
+        seen_cmd[:] = cmd
+        return __import__("subprocess").CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="TOTAL 1 0 100%\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(qa, "_bootstrap_test_environment", fake_bootstrap)
+    monkeypatch.setattr(qa.subprocess, "run", fake_run)
+
+    out = run_test_and_coverage(state, cov_target="app", coverage_scope="runtime")
+    assert out.test_run_report.get("status") == "passed"
+    assert "--cov=app" in seen_cmd
+    assert not any(str(arg).startswith("--cov-config=") for arg in seen_cmd)
+
+
+def test_run_test_and_coverage_full_source_adds_cov_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from codelyzer.testing import qa_agents as qa
+
+    state = WorkflowState(repo_path=tmp_path, base_ref="HEAD", target_ref=None, coverage_scope="full_source")
+    seen_cmd: list[str] = []
+
+    def fake_bootstrap(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "venv_python": "python3",
+            "pythonpath_override": None,
+            "system_python": False,
+        }
+
+    def fake_run(cmd: list[str], **kwargs: object):  # type: ignore[no-untyped-def]
+        seen_cmd[:] = cmd
+        return __import__("subprocess").CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="TOTAL 1 0 100%\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(qa, "_bootstrap_test_environment", fake_bootstrap)
+    monkeypatch.setattr(qa.subprocess, "run", fake_run)
+
+    out = run_test_and_coverage(state, cov_target="app", coverage_scope="full_source")
+    assert out.test_run_report.get("status") == "passed"
+    assert "--cov" in seen_cmd
+    assert "--cov=app" not in seen_cmd
+    assert any(str(arg).startswith("--cov-config=") for arg in seen_cmd)

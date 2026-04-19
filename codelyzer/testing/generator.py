@@ -11,6 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from codelyzer.config import settings
 from codelyzer.diff.parser import FileDiff, StructuredDiff
+from codelyzer.eval.tracing import traceable_step
 from codelyzer.llm.client import BaseLLMClient, get_llm_client
 from codelyzer.retrieval.indexer import RepositoryIndexer
 from codelyzer.workflow.state import GeneratedTest, WorkflowState
@@ -649,6 +650,7 @@ def _research_guidance_for_file(state: WorkflowState, source_key: str) -> str:
     return "\n".join(matched) if matched else "None"
 
 
+@traceable_step("generate_tests_for_changes")
 def generate_tests_for_changes(
     state: WorkflowState,
     indexer: RepositoryIndexer | None = None,

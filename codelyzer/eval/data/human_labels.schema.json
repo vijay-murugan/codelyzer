@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodelyzerHumanEvalRow",
+  "type": "object",
+  "required": ["case_id", "surface"],
+  "properties": {
+    "case_id": { "type": "string", "description": "Stable id for the benchmark case (commit, branch pair, or synthetic)." },
+    "surface": {
+      "type": "string",
+      "enum": ["pr_summary", "generated_tests"],
+      "description": "Which artifact human annotators score."
+    },
+    "input_refs": {
+      "type": "object",
+      "description": "Opaque pointers: repo_path, base, target, flags used for reproduce."
+    },
+    "summary_faithfulness_1_5": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "For pr_summary: claims supported by diff only."
+    },
+    "summary_usefulness_1_5": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "test_usefulness_1_5": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "For generated_tests: would you merge as a starting point?"
+    },
+    "notes": { "type": "string" }
+  },
+  "additionalProperties": true
+}

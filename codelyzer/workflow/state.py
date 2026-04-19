@@ -17,6 +17,11 @@ class WorkflowState:
     repo_path: Path
     base_ref: str
     target_ref: Optional[str] = None
+    pytest_targets: Optional[list[str]] = None
+    #: When True, QA runs ``sys.executable -m pytest`` (no ``.codelyzer_venv``, no pip install).
+    use_system_python: bool = False
+    #: Coverage aggregation mode for QA runs: "runtime" (default) or "full_source".
+    coverage_scope: Literal["runtime", "full_source"] = "runtime"
 
     # Intermediate processing data
     raw_diff: Optional[str] = None
@@ -82,6 +87,7 @@ class WorkflowState:
             "tests_removed": removed_count,
             "final_validation_status": self.final_validation_status,
             "qa_report_path": self.qa_report_path,
+            "coverage_scope": self.coverage_scope,
             "errors": len(self.errors),
             "complete": self.is_complete()
         }

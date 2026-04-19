@@ -4,6 +4,8 @@ import ast
 import os
 import re
 import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,8 @@ from typing import Any
 import structlog
 from langchain_core.prompts import ChatPromptTemplate
 
+from codelyzer.eval.trajectory import record_validation_step
+from codelyzer.eval.tracing import traceable_step
 from codelyzer.llm.client import BaseLLMClient, get_llm_client
 from codelyzer.testing.generator import mock_helpers_in_test_code, source_suggests_external_io
 from codelyzer.workflow.state import WorkflowState
@@ -19,7 +23,43 @@ logger = structlog.get_logger(__name__)
 
 _SUMMARY_LINE_RE = re.compile(r"=+\s+(\d+)\s+(\w+)")
 _COLLECTED_RE = re.compile(r"collected\s+(\d+)\s+items?")
-_COVERAGE_TOTAL_RE = re.compile(r"TOTAL\s+\d+\s+\d+\s+(\d+)%")
+_COVERAGE_TOTAL_RE = re.compile(r"TOTAL(?:\s+\d+){2,4}\s+(\d+)%")
+
+
+def _normalize_coverage_scope(scope: str | None) -> str:
+    if scope == "full_source":
+        return "full_source"
+    return "runtime"
+
+
+def _coverage_config_path(
+    repo_path: Path,
+    cov_target: str,
+    coverage_scope: str,
+) -> Path | None:
+    if _normalize_coverage_scope(coverage_scope) != "full_source":
+        return None
+    tf = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".codelyzer.coveragerc",
+        prefix="codelyzer_",
+        dir=repo_path,
+        delete=False,
+    )
+    target_path = Path(cov_target)
+    if not target_path.is_absolute():
+        target_path = (repo_path / cov_target).resolve()
+
+    with tf:
+        tf.write("[run]\n")
+        tf.write("source =\n")
+        tf.write(f"    {target_path}\n")
+        tf.write("branch = True\n")
+        tf.write("\n[report]\n")
+        # Needed for repos that use namespace-package layout (no __init__.py).
+        tf.write("include_namespace_packages = True\n")
+    return Path(tf.name)
 
 
 @dataclass
@@ -39,6 +79,15 @@ def _pytest_target_paths(state: WorkflowState) -> list[str]:
     deduped = sorted(set(generated))
     if deduped:
         return deduped
+    configured: list[str] = []
+    if state.pytest_targets:
+        for t in state.pytest_targets:
+            if isinstance(t, str):
+                s = t.strip()
+                if s:
+                    configured.append(s)
+    if configured:
+        return configured
     return ["tests"]
 
 
@@ -56,9 +105,9 @@ def _detect_dependency_file(repo_path: Path) -> Path | None:
 
 
 def _detect_pythonpath_override(repo_path: Path) -> str | None:
-    backend_app = repo_path / "backend" / "app"
-    if backend_app.exists() and backend_app.is_dir():
-        return "backend"
+    """Prepend repo root to PYTHONPATH when ``app/`` exists (``import app...`` from cwd)."""
+    if (repo_path / "app").is_dir():
+        return "."
     return None
 
 
@@ -71,6 +120,8 @@ def _venv_python_path(repo_path: Path) -> Path:
 def _bootstrap_test_environment(
     repo_path: Path,
     timeout_seconds: int,
+    *,
+    use_system_python: bool = False,
 ) -> dict[str, Any]:
     info: dict[str, Any] = {
         "enabled": True,
@@ -82,7 +133,27 @@ def _bootstrap_test_environment(
         "install_command": [],
         "status": "ok",
         "error": "",
+        "system_python": bool(use_system_python),
     }
+    if use_system_python:
+        exe = sys.executable
+        info["venv_path"] = "(none, system interpreter)"
+        info["venv_python"] = exe
+        info["install_command"] = []
+        probe = subprocess.run(
+            [exe, "-m", "pytest", "--version"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=min(60, timeout_seconds),
+            check=False,
+        )
+        if probe.returncode != 0:
+            info["status"] = "failed"
+            tail = ((probe.stderr or "") + (probe.stdout or ""))[-400:]
+            info["error"] = f"`{exe} -m pytest` unavailable: {tail}"
+        return info
+
     pybin = _venv_python_path(repo_path)
     info["venv_python"] = str(pybin)
     if not pybin.exists():
@@ -137,14 +208,20 @@ def _candidate_source_files(state: WorkflowState) -> list[str]:
     return [str(item.file_path) for item in state.structured_diff.files if str(item.file_path).endswith(".py")]
 
 
+@traceable_step("run_test_and_coverage")
 def run_test_and_coverage(
     state: WorkflowState,
     cov_target: str = "codelyzer",
     timeout_seconds: int = 600,
+    coverage_scope: str = "runtime",
 ) -> WorkflowState:
     """Single pytest invocation used by both testRunnerAgent and coverageAgent."""
 
-    bootstrap = _bootstrap_test_environment(state.repo_path, timeout_seconds=timeout_seconds)
+    bootstrap = _bootstrap_test_environment(
+        state.repo_path,
+        timeout_seconds=timeout_seconds,
+        use_system_python=state.use_system_python,
+    )
     if bootstrap.get("status") != "ok":
         msg = bootstrap.get("error") or "QA bootstrap failed"
         state.add_error(msg)
@@ -166,17 +243,23 @@ def run_test_and_coverage(
 
     targets = _pytest_target_paths(state)
     pybin = bootstrap.get("venv_python") or "python3"
+    cov_cfg_path = _coverage_config_path(state.repo_path, cov_target, coverage_scope)
     cmd = [
         str(pybin),
         "-m",
         "pytest",
         *targets,
-        f"--cov={cov_target}",
         "--cov-branch",
         "--cov-report=term-missing",
         "--cov-report=xml",
         "-q",
     ]
+    if cov_cfg_path is not None:
+        # Full-source mode relies on coveragerc [run] source to include all files.
+        cmd.insert(4 + len(targets), "--cov")
+        cmd.append(f"--cov-config={cov_cfg_path}")
+    else:
+        cmd.insert(4 + len(targets), f"--cov={cov_target}")
     logger.info("Running tandem test+coverage", command=cmd)
     env = os.environ.copy()
     pythonpath_override = bootstrap.get("pythonpath_override")
@@ -213,6 +296,12 @@ def run_test_and_coverage(
         }
         state.final_validation_status = "timeout"
         return state
+    finally:
+        if cov_cfg_path is not None:
+            try:
+                cov_cfg_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     artifacts = QARunArtifacts(
         command=cmd,
@@ -222,6 +311,7 @@ def run_test_and_coverage(
     )
 
     state.test_run_report = parse_test_runner_output(artifacts)
+    state.test_run_report["targets"] = targets
     state.test_run_report["bootstrap"] = bootstrap
     state.coverage_report = parse_coverage_output(artifacts, state.repo_path)
     state.final_validation_status = state.test_run_report.get("status", "unknown")
@@ -396,6 +486,7 @@ def _get_llm_client_safe() -> BaseLLMClient | None:
         return None
 
 
+@traceable_step("review_generated_tests_agent")
 def review_generated_tests_agent(state: WorkflowState) -> WorkflowState:
     """Review generated pytest code only. Intended to run after generation, before pytest."""
 
@@ -539,6 +630,7 @@ def append_pytest_failure_findings(state: WorkflowState) -> WorkflowState:
     return state
 
 
+@traceable_step("test_research_agent")
 def test_research_agent(state: WorkflowState) -> WorkflowState:
     coverage = state.coverage_report or {}
     low_files = coverage.get("low_coverage_files", [])[:10]
@@ -601,6 +693,7 @@ def test_research_agent(state: WorkflowState) -> WorkflowState:
     return state
 
 
+@traceable_step("research_before_generation_agent")
 def research_before_generation_agent(state: WorkflowState) -> WorkflowState:
     suggestions: list[dict[str, Any]] = []
     for source_file in _candidate_source_files(state):
@@ -692,6 +785,7 @@ def _remove_vacuous_tests_from_content(content: str) -> tuple[str, list[str]]:
     return normalized, remove_names
 
 
+@traceable_step("auto_fix_generated_tests_agent")
 def auto_fix_generated_tests_agent(state: WorkflowState) -> WorkflowState:
     fixes: list[dict[str, Any]] = []
     for source_file, generated in state.generated_tests.items():
@@ -723,6 +817,7 @@ def auto_fix_generated_tests_agent(state: WorkflowState) -> WorkflowState:
     return state
 
 
+@traceable_step("remove_inappropriate_tests_agent")
 def remove_inappropriate_tests_agent(state: WorkflowState) -> WorkflowState:
     removed: list[dict[str, Any]] = []
     for source_file, generated in state.generated_tests.items():
@@ -756,6 +851,7 @@ def remove_inappropriate_tests_agent(state: WorkflowState) -> WorkflowState:
     return state
 
 
+@traceable_step("write_qa_markdown_report")
 def write_qa_markdown_report(state: WorkflowState, output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     test_run = state.test_run_report or {}
@@ -770,6 +866,7 @@ def write_qa_markdown_report(state: WorkflowState, output_path: Path) -> Path:
         f"- Collected tests: {test_run.get('collected', 'n/a')}",
         f"- Counts: {test_run.get('counts', {})}",
         f"- Final validation status: {state.final_validation_status or 'unknown'}",
+        f"- Coverage scope: {state.coverage_scope}",
         "",
     ]
     bootstrap = test_run.get("bootstrap", {}) if isinstance(test_run, dict) else {}
@@ -778,6 +875,7 @@ def write_qa_markdown_report(state: WorkflowState, output_path: Path) -> Path:
             "### Test Environment Bootstrap",
             f"- Status: {bootstrap.get('status', 'not-run')}",
             f"- Venv path: {bootstrap.get('venv_path', 'n/a')}",
+            f"- System Python (no venv): {bootstrap.get('system_python', False)}",
             f"- Dependency file: {bootstrap.get('dependency_file', 'none')}",
             f"- PYTHONPATH override: {bootstrap.get('pythonpath_override', 'none')}",
         ]
@@ -868,12 +966,16 @@ def run_qa_agents(
     report_path: Path,
     cov_target: str = "codelyzer",
     min_coverage: int | None = None,
+    coverage_scope: str = "runtime",
 ) -> WorkflowState:
     """Run tests + coverage, record pytest failures, coverage research, and report (no LLM test-code review)."""
 
-    state = run_test_and_coverage(state, cov_target=cov_target)
+    state = run_test_and_coverage(state, cov_target=cov_target, coverage_scope=coverage_scope)
+    record_validation_step("run_test_and_coverage", pytest_status=state.test_run_report.get("status"))
     state = append_pytest_failure_findings(state)
+    record_validation_step("append_pytest_failure_findings")
     state = test_research_agent(state)
+    record_validation_step("test_research_agent")
 
     coverage_total = state.coverage_report.get("total_percent")
     if min_coverage is not None and isinstance(coverage_total, int):
@@ -882,6 +984,7 @@ def run_qa_agents(
                 f"Coverage threshold unmet: {coverage_total}% < required {min_coverage}%"
             )
     write_qa_markdown_report(state, report_path)
+    record_validation_step("write_qa_markdown_report", path=str(report_path))
     return state
 
 
@@ -890,24 +993,34 @@ def run_integrated_generation_validation(
     report_path: Path,
     cov_target: str = "codelyzer",
     min_coverage: int | None = None,
+    coverage_scope: str = "runtime",
 ) -> WorkflowState:
     """After generation: review generated tests, auto-fix, pytest+coverage, prune if needed, research, report."""
 
     state = review_generated_tests_agent(state)
+    record_validation_step("review_generated_tests_agent", findings=len(state.review_findings))
     state = auto_fix_generated_tests_agent(state)
-    state = run_test_and_coverage(state, cov_target=cov_target)
+    record_validation_step("auto_fix_generated_tests_agent", fixes=len(state.refinement_fixes))
+    state = run_test_and_coverage(state, cov_target=cov_target, coverage_scope=coverage_scope)
+    record_validation_step("run_test_and_coverage", pytest_status=state.test_run_report.get("status"))
     state = append_pytest_failure_findings(state)
+    record_validation_step("append_pytest_failure_findings")
 
     if state.test_run_report.get("status") != "passed":
         state = remove_inappropriate_tests_agent(state)
-        state = run_test_and_coverage(state, cov_target=cov_target)
+        record_validation_step("remove_inappropriate_tests_agent", removed=len(state.removed_tests))
+        state = run_test_and_coverage(state, cov_target=cov_target, coverage_scope=coverage_scope)
+        record_validation_step("run_test_and_coverage_retry", pytest_status=state.test_run_report.get("status"))
         state = append_pytest_failure_findings(state)
+        record_validation_step("append_pytest_failure_findings_retry")
 
     state = test_research_agent(state)
+    record_validation_step("test_research_agent")
     coverage_total = state.coverage_report.get("total_percent")
     if min_coverage is not None and isinstance(coverage_total, int) and coverage_total < min_coverage:
         state.add_error(
             f"Coverage threshold unmet: {coverage_total}% < required {min_coverage}%"
         )
     write_qa_markdown_report(state, report_path)
+    record_validation_step("write_qa_markdown_report", path=str(report_path))
     return state
