@@ -102,14 +102,20 @@ def _build_diff_payload(file_diff: FileDiff, max_chars: int) -> str:
 
 def _clean_generated_code(raw_text: str) -> str:
     text = raw_text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    return text
+    if not text:
+        return ""
+
+    lines = text.splitlines()
+    cleaned_lines: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped in {"```", "~~~", "`"}:
+            continue
+        if stripped.startswith(("```", "~~~")):
+            continue
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
 
 
 def _strip_llm_meta_comments(code: str) -> str:
@@ -504,25 +510,26 @@ def _build_generation_prompt() -> ChatPromptTemplate:
             (
                 "system",
                 "You generate pytest unit tests for changed Python code. "
-                "Return only valid Python test code: no markdown fences, no prose, no multi-line blocks of "
-                "'#' comments inside test functions (at most one short '#' line per test if unavoidable). "
-                "Do not write meta-commentary about mocking strategy, global state, or what you cannot test—"
-                "write the actual patches and assertions instead. "
-                "Every def test_* must either (1) include at least one assert, pytest.raises(...) block, or "
-                "mock assert_called* call, or (2) be a single test marked with pytest.mark.skip(reason=...). "
-                "External I/O (HTTP clients, cloud SDKs, SQL/NoSQL drivers, subprocess, sockets): never call real services. "
-                "Use unittest.mock.patch or pytest.MonkeyPatch where the symbol is resolved in the module under test "
-                "(patch the name as bound in that file, e.g. patch('mypkg.service.requests.get') if the module uses requests.get). "
-                "Configure mocks to mirror real usage: return_value, side_effect, and nested attributes the production code "
-                "reads (e.g. mock_resp.json.return_value = {{...}}, mock_resp.status_code = 200, cursor.fetchone.return_value). "
-                "Prefer unit tests over integration tests. "
-                "Cover newly added branches, changed return values, changed error handling, and visible public behavior. "
-                "Always import real symbols under test from project modules; do not redefine production classes/functions in tests. "
-                "Never emit placeholders, narrative comments, or pseudo-code scaffolding. "
-                "If context is incomplete, emit the smallest runnable pytest scaffold and mark it skipped.\n"
-                "BAD: test calls requests.get(...) or opens a real DB with no patch.\n"
-                "BAD: many lines of '# We need to patch...' without patch() or assert.\n"
-                "GOOD: with patch('app.api.requests.get', return_value=mock_resp) as m: ... assert m.called."
+                "The unit tests should cover the entire code diff and aim for high line coverage."
+                "Return only valid Python test code, with no comments, no markdown fences, no backticks, and no explanation. "
+                "Use only the import contract provided in the prompt. "
+                "Imports should start from shopkit.models for model objects"
+                "Import models directly from the resolved models.py module when model instances are needed. Import should be from shopkit.models or the appropriate relative path but any file imports should start with shopkit."
+                "Import models directly from the resolved models.py module when mocking model objects. The models will also be part of the diff with the file name models.py"
+                "Prefer constructing real dataclass or model instances from models.py instead of mocking them when the code is deterministic and in-memory. "
+                "Make sure that all the attributes used in the source code for the models are present on the constructed instances. "
+                "Only use mocks or monkeypatching for real I/O, subprocesses, network, databases, environment access, or time randomness. "
+                "Check all model attributes used in the source code and ensure they exist on the constructed objects. "
+                "If the changed code contains pure functions, generate direct assertion-based tests for normal cases, boundary values, and error branches. "
+                "If the changed code contains dataclasses or lightweight models, test their methods and defaults with real instances. "
+                "If the changed code aggregates orders, cart items, products, categories, or prices, build realistic Order/Product/CartItem fixtures and cover empty inputs, threshold edges, sorting, tie-breakers, and rounding behavior. "
+                "For utility helpers similar to clamp, normalization, or money rounding, cover invalid ranges, None/blank handling, uppercase trimming, exact boundaries, and floating-point rounding edge cases. "
+                "For analytics-style functions over collections, cover empty collections, per-category grouping, sorted output, bulk thresholds, and revenue-share percentages. "
+                "Import pytest and any necessary testing utilities, but do not add extra dependencies that are not already in the diff. "
+                "If the import contract is ambiguous or insufficient, emit the smallest runnable pytest scaffold and mark it skipped. "
+                "Use pytest style only and do not add dependencies that are not already implied by the diff. "
+                "Generate complete tests, not placeholders, whenever the source and diff provide enough information. "
+                "Do not add any comments or explanations.",
             ),
             (
                 "human",
