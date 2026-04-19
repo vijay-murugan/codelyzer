@@ -50,14 +50,20 @@ def _build_diff_payload(file_diff: FileDiff, max_chars: int) -> str:
 
 def _clean_generated_code(raw_text: str) -> str:
     text = raw_text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    return text
+    if not text:
+        return ""
+
+    lines = text.splitlines()
+    cleaned_lines: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped in {"```", "~~~", "`"}:
+            continue
+        if stripped.startswith(("```", "~~~")):
+            continue
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
 
 
 def _extract_test_names(code: str) -> List[str]:
