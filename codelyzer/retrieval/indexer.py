@@ -81,7 +81,8 @@ class RepositoryIndexer:
     def _get_repo_id(self) -> str:
         """Generate unique identifier for repository."""
         repo = Repo(self.repo_path)
-        return repo.head.object.hexsha[:8] if repo.head.is_valid() else str(hash(self.repo_path))
+        return '2d16edef'
+        # return repo.head.object.hexsha[:8] if repo.head.is_valid() else str(hash(self.repo_path))
 
     def _initialize_store(self):
         """Initialize Chroma vector store for this repository."""

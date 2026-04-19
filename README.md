@@ -50,7 +50,20 @@ codelyzer analyze /path/to/your/repo --base main --target feature-branch
 
 # Pre-build semantic index for repository
 codelyzer index /path/to/your/repo
+
+# Generate pytest tests for changed Python files (requires a non-empty diff)
+codelyzer analyze /path/to/your/repo --generate-tests
+
+# Same, with auto-validation (research, review, rerun, coverage report)
+codelyzer analyze /path/to/your/repo --generate-tests --auto-validate-tests --cov-target . --qa-report-path /path/to/your/repo/reports/qa_report.md
 ```
+
+## Troubleshooting: no test files generated
+
+- Pass **`--generate-tests`**. The `analyze` command does not write tests by default.
+- The git diff must be **non-empty**: default is uncommitted changes vs `HEAD`. If everything is committed, you will see a warning. Compare branches instead, e.g. `codelyzer analyze /path/to/repo --base main --target feature --generate-tests`.
+- Only **non-test** `.py` files are targets (paths under `tests/`, `test_*.py`, or `*_test.py` layouts are skipped). A diff of only config, markdown, or test files will not create new production tests.
+- If tests are **appended** to an existing file and every generated `test_*` name already exists, nothing is written; the report will say all names already exist (**no file change**).
 
 ## Storage
 
