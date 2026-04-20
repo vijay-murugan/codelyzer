@@ -47,8 +47,11 @@ def run_analyze_workflow(
     ``use_system_python``: when True, QA uses ``sys.executable`` and does not create
     ``.codelyzer_venv`` or run ``pip install``.
 
-    ``coverage_scope``: ``runtime`` keeps current behavior; ``full_source`` forces
-    coverage source enumeration against ``cov_target`` so unexecuted files count as 0%.
+    ``coverage_scope``:
+    - ``runtime`` keeps current behavior,
+    - ``full_source`` forces coverage source enumeration against ``cov_target`` so
+      unexecuted files count as 0%,
+    - ``diff_files`` limits reported coverage to changed Python files in the diff.
 
     Raises on fatal diff parse failure (caller may catch).
     """
@@ -58,12 +61,17 @@ def run_analyze_workflow(
         target_ref=target,
         pytest_targets=pytest_targets,
         use_system_python=use_system_python,
-        coverage_scope="full_source" if coverage_scope == "full_source" else "runtime",
+        coverage_scope=(
+            "full_source"
+            if coverage_scope == "full_source"
+            else ("diff_files" if coverage_scope == "diff_files" else "runtime")
+        ),
     )
+    use_llm = bool(generate_tests or auto_validate_tests)
 
     parser = GitDiffParser(repo_path)
     state.structured_diff = parser.parse_diff(base, target)
-    state.pr_summary = render_changed_files_summary(state.structured_diff)
+    state.pr_summary = render_changed_files_summary(state.structured_diff, use_llm=use_llm)
 
     indexer: RepositoryIndexer | None = None
     try:
@@ -95,9 +103,13 @@ def run_analyze_workflow(
                 cov_target=cov_target,
                 min_coverage=min_coverage,
                 coverage_scope=state.coverage_scope,
+                use_llm=use_llm,
             )
     elif auto_validate_tests:
-        state.add_error("--auto-validate-tests requires generate_tests in workflow")
+        logger.warning(
+            "Ignoring auto_validate_tests because generate_tests is disabled",
+            repo=str(repo_path),
+        )
 
     if run_qa:
         default_report_path = repo_path / "reports" / "qa_report.md"
@@ -108,6 +120,7 @@ def run_analyze_workflow(
             cov_target=cov_target,
             min_coverage=min_coverage,
             coverage_scope=state.coverage_scope,
+            use_llm=use_llm,
         )
 
     return state

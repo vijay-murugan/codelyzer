@@ -37,7 +37,29 @@ OLLAMA_MODEL=gemma4
 EMBEDDING_MODEL=nomic-embed-text
 ```
 
-If the embedding model is not installed yet, the index command will try to pull it automatically. You can also pull it yourself with `ollama pull nomic-embed-text`.
+### Ollama Cloud (hosted LLM)
+
+For chat / structured outputs against [Ollama Cloud](https://docs.ollama.com/cloud) instead of a local daemon, set an [API key](https://ollama.com/settings/keys) and either enable cloud mode **or** point the LLM host at `https://ollama.com`. Indexing embeddings still use `OLLAMA_BASE_URL` when you use the split config below (local base URL + cloud flag).
+
+**Option A — explicit cloud fields (keep local `OLLAMA_BASE_URL` for embeddings):**
+
+```ini
+OLLAMA_USE_CLOUD=true
+OLLAMA_API_KEY=your_key
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_CLOUD_BASE_URL=https://ollama.com
+OLLAMA_CLOUD_MODEL=gpt-oss:120b
+```
+
+**Option B — single host for the LLM (no `OLLAMA_USE_CLOUD` needed):**
+
+```ini
+OLLAMA_API_KEY=your_key
+OLLAMA_BASE_URL=https://ollama.com
+OLLAMA_MODEL=gpt-oss:120b
+```
+
+`.env` is loaded from the **codelyzer repo root** and then the **current working directory** (cwd wins on duplicate keys), so flags apply even if you run `codelyzer analyze /some/other/repo` from another directory.
 
 ## Usage
 

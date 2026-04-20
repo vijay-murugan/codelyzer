@@ -29,15 +29,34 @@ _COVERAGE_TOTAL_RE = re.compile(r"TOTAL(?:\s+\d+){2,4}\s+(\d+)%")
 def _normalize_coverage_scope(scope: str | None) -> str:
     if scope == "full_source":
         return "full_source"
+    if scope == "diff_files":
+        return "diff_files"
     return "runtime"
 
 
+def _diff_python_files(state: WorkflowState) -> list[Path]:
+    diff = state.structured_diff
+    if not diff or not diff.files:
+        return []
+    files: list[Path] = []
+    for item in diff.files:
+        p = item.file_path
+        if item.change_type == "deleted":
+            continue
+        if str(p).endswith(".py"):
+            files.append((state.repo_path / p).resolve())
+    # Keep deterministic order and remove dupes.
+    return sorted(set(files))
+
+
 def _coverage_config_path(
+    state: WorkflowState,
     repo_path: Path,
     cov_target: str,
     coverage_scope: str,
 ) -> Path | None:
-    if _normalize_coverage_scope(coverage_scope) != "full_source":
+    normalized_scope = _normalize_coverage_scope(coverage_scope)
+    if normalized_scope not in {"full_source", "diff_files"}:
         return None
     tf = tempfile.NamedTemporaryFile(
         mode="w",
@@ -54,11 +73,22 @@ def _coverage_config_path(
     with tf:
         tf.write("[run]\n")
         tf.write("source =\n")
-        tf.write(f"    {target_path}\n")
+        if normalized_scope == "diff_files":
+            # For changed-file scope, measure from the repo root and filter report
+            # to changed python files only.
+            tf.write(f"    {repo_path.resolve()}\n")
+        else:
+            tf.write(f"    {target_path}\n")
         tf.write("branch = True\n")
         tf.write("\n[report]\n")
         # Needed for repos that use namespace-package layout (no __init__.py).
         tf.write("include_namespace_packages = True\n")
+        if normalized_scope == "diff_files":
+            diff_files = _diff_python_files(state)
+            if diff_files:
+                tf.write("include =\n")
+                for f in diff_files:
+                    tf.write(f"    {f}\n")
     return Path(tf.name)
 
 
@@ -105,8 +135,12 @@ def _detect_dependency_file(repo_path: Path) -> Path | None:
 
 
 def _detect_pythonpath_override(repo_path: Path) -> str | None:
-    """Prepend repo root to PYTHONPATH when ``app/`` exists (``import app...`` from cwd)."""
+    """Return PYTHONPATH prefix for common Python repo layouts."""
+    if (repo_path / "src").is_dir():
+        # Typical src-layout packages (e.g. src/shopkit).
+        return "src"
     if (repo_path / "app").is_dir():
+        # Flat app-layout repos importing from app.*.
         return "."
     return None
 
@@ -243,7 +277,7 @@ def run_test_and_coverage(
 
     targets = _pytest_target_paths(state)
     pybin = bootstrap.get("venv_python") or "python3"
-    cov_cfg_path = _coverage_config_path(state.repo_path, cov_target, coverage_scope)
+    cov_cfg_path = _coverage_config_path(state, state.repo_path, cov_target, coverage_scope)
     cmd = [
         str(pybin),
         "-m",
@@ -967,6 +1001,7 @@ def run_qa_agents(
     cov_target: str = "codelyzer",
     min_coverage: int | None = None,
     coverage_scope: str = "runtime",
+    use_llm: bool = True,
 ) -> WorkflowState:
     """Run tests + coverage, record pytest failures, coverage research, and report (no LLM test-code review)."""
 
@@ -974,8 +1009,9 @@ def run_qa_agents(
     record_validation_step("run_test_and_coverage", pytest_status=state.test_run_report.get("status"))
     state = append_pytest_failure_findings(state)
     record_validation_step("append_pytest_failure_findings")
-    state = test_research_agent(state)
-    record_validation_step("test_research_agent")
+    if use_llm:
+        state = test_research_agent(state)
+        record_validation_step("test_research_agent")
 
     coverage_total = state.coverage_report.get("total_percent")
     if min_coverage is not None and isinstance(coverage_total, int):
@@ -994,11 +1030,13 @@ def run_integrated_generation_validation(
     cov_target: str = "codelyzer",
     min_coverage: int | None = None,
     coverage_scope: str = "runtime",
+    use_llm: bool = True,
 ) -> WorkflowState:
     """After generation: review generated tests, auto-fix, pytest+coverage, prune if needed, research, report."""
 
-    state = review_generated_tests_agent(state)
-    record_validation_step("review_generated_tests_agent", findings=len(state.review_findings))
+    if use_llm:
+        state = review_generated_tests_agent(state)
+        record_validation_step("review_generated_tests_agent", findings=len(state.review_findings))
     state = auto_fix_generated_tests_agent(state)
     record_validation_step("auto_fix_generated_tests_agent", fixes=len(state.refinement_fixes))
     state = run_test_and_coverage(state, cov_target=cov_target, coverage_scope=coverage_scope)
@@ -1014,8 +1052,9 @@ def run_integrated_generation_validation(
         state = append_pytest_failure_findings(state)
         record_validation_step("append_pytest_failure_findings_retry")
 
-    state = test_research_agent(state)
-    record_validation_step("test_research_agent")
+    if use_llm:
+        state = test_research_agent(state)
+        record_validation_step("test_research_agent")
     coverage_total = state.coverage_report.get("total_percent")
     if min_coverage is not None and isinstance(coverage_total, int) and coverage_total < min_coverage:
         state.add_error(

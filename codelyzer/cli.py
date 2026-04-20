@@ -1,7 +1,14 @@
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env before any `codelyzer` import — `codelyzer.config` builds `settings` at import time.
+_repo_root = Path(__file__).resolve().parent.parent
+load_dotenv(_repo_root / ".env", override=False)
+load_dotenv(Path.cwd() / ".env", override=True)
+
 import click
 import structlog
-from pathlib import Path
-from dotenv import load_dotenv
 
 from codelyzer import __version__
 from codelyzer.changed_files_summary import render_changed_files_summary
@@ -16,7 +23,6 @@ from codelyzer.testing.qa_agents import (
 from codelyzer.eval.batch import eval_cli
 from codelyzer.workflow.state import WorkflowState
 
-load_dotenv()
 logger = structlog.get_logger(__name__)
 
 
@@ -109,10 +115,10 @@ cli.add_command(eval_cli)
 @click.option('--min-coverage', type=int, help='Optional minimum required total coverage percent')
 @click.option(
     '--coverage-scope',
-    type=click.Choice(['runtime', 'full_source'], case_sensitive=False),
+    type=click.Choice(['runtime', 'full_source', 'diff_files'], case_sensitive=False),
     default='runtime',
     show_default=True,
-    help='Coverage accounting mode: runtime (default) or full_source (count unexecuted files in cov target).',
+    help='Coverage accounting mode: runtime, full_source, or diff_files (changed Python files only).',
 )
 @click.option(
     '--pytest-target',
@@ -150,7 +156,11 @@ def analyze(
         target_ref=target,
         pytest_targets=pytest_targets if pytest_targets else None,
         use_system_python=qa_system_python,
-        coverage_scope="full_source" if str(coverage_scope).lower() == "full_source" else "runtime",
+        coverage_scope=(
+            "full_source"
+            if str(coverage_scope).lower() == "full_source"
+            else ("diff_files" if str(coverage_scope).lower() == "diff_files" else "runtime")
+        ),
     )
 
     # Parse git diff

@@ -1,0 +1,15 @@
+[
+  {
+    "label": "self_repo_smoke",
+    "repo_path": "/Users/vijaymurugan/Desktop/projects/sample_order_repo-main/",
+    "base": "HEAD",
+    "generate_tests": true,
+    "auto_validate_tests": false,
+    "run_qa": true,
+    "require_tests_for_e2e": true,
+    "pytest_targets": ["tests"],
+    "use_system_python": true,
+    "coverage_scope": "diff_files",
+    "cov_target": "/Users/vijaymurugan/Desktop/projects/sample_order_repo-main/src/shopkit"
+  }
+]

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import pytest
 
-from codelyzer.analysis_runner import workflow_to_eval_record
+from codelyzer.analysis_runner import run_analyze_workflow, workflow_to_eval_record
 from codelyzer.changed_files_summary import summarize_file_with_llm
 from codelyzer.diff.parser import DiffHunk, FileDiff, StructuredDiff
 from codelyzer.eval.diff_coverage import (
@@ -281,13 +281,25 @@ def test_eval_batch_cli_writes_row(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     runner = CliRunner()
     result = runner.invoke(batch_mod.eval_cli, ["batch", str(cfg), "--output", str(out)])
     assert result.exit_code == 0, result.output
-    lines = out.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 1
-    row = json.loads(lines[0])
+    parsed_out = json.loads(out.read_text(encoding="utf-8"))
+    assert isinstance(parsed_out, list)
+    assert len(parsed_out) == 1
+    row = parsed_out[0]
     assert row["case_label"] == "unit"
     assert "error" not in row
     assert "scorecards" in row
     assert seen_kwargs and seen_kwargs[0].get("coverage_scope") == "runtime"
+    pretty = tmp_path / "out.pretty.json"
+    assert pretty.exists()
+    parsed_pretty = json.loads(pretty.read_text(encoding="utf-8"))
+    assert isinstance(parsed_pretty, list)
+    assert len(parsed_pretty) == 1
+    assert parsed_pretty[0]["case_label"] == "unit"
+    raw_jsonl = tmp_path / "out.raw.jsonl"
+    assert raw_jsonl.exists()
+    raw_lines = raw_jsonl.read_text(encoding="utf-8").strip().splitlines()
+    assert len(raw_lines) == 1
+    assert json.loads(raw_lines[0])["case_label"] == "unit"
 
 
 def test_eval_batch_cli_passes_full_source_coverage_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -323,6 +335,41 @@ def test_eval_batch_cli_passes_full_source_coverage_scope(tmp_path: Path, monkey
     result = runner.invoke(batch_mod.eval_cli, ["batch", str(cfg), "--output", str(out)])
     assert result.exit_code == 0, result.output
     assert seen_kwargs and seen_kwargs[0].get("coverage_scope") == "full_source"
+
+
+def test_eval_batch_cli_passes_diff_files_coverage_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from codelyzer.eval import batch as batch_mod
+
+    seen_kwargs: list[dict[str, object]] = []
+
+    def fake_workflow(repo_path: Path, **kwargs: object) -> WorkflowState:
+        seen_kwargs.append(kwargs)
+        s = WorkflowState(repo_path=tmp_path, base_ref="HEAD", target_ref=None)
+        s.structured_diff = StructuredDiff(
+            base_commit="a",
+            target_commit="b",
+            total_files_changed=0,
+            total_insertions=0,
+            total_deletions=0,
+            files=[],
+        )
+        s.pr_summary = "summary"
+        return s
+
+    monkeypatch.setattr(batch_mod, "run_analyze_workflow", fake_workflow)
+
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(
+        json.dumps([{"repo_path": str(tmp_path), "base": "HEAD", "coverage_scope": "diff_files"}]),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.jsonl"
+    from click.testing import CliRunner
+
+    runner = CliRunner()
+    result = runner.invoke(batch_mod.eval_cli, ["batch", str(cfg), "--output", str(out)])
+    assert result.exit_code == 0, result.output
+    assert seen_kwargs and seen_kwargs[0].get("coverage_scope") == "diff_files"
 
 
 def test_eval_batch_cli_verbose_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -370,3 +417,56 @@ def test_human_rubric_paths_exist() -> None:
 
     assert SCHEMA_PATH.is_file()
     assert EXAMPLE_LABELS_PATH.is_file()
+
+
+def test_run_analyze_workflow_skips_llm_when_generation_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from codelyzer import analysis_runner as ar
+    from codelyzer import changed_files_summary as cfs
+
+    class StubParser:
+        def __init__(self, _repo: Path) -> None:
+            pass
+
+        def parse_diff(self, _base: str, _target: str | None):  # type: ignore[no-untyped-def]
+            return StructuredDiff(
+                base_commit="a",
+                target_commit="b",
+                total_files_changed=0,
+                total_insertions=0,
+                total_deletions=0,
+                files=[],
+            )
+
+    class StubIndexer:
+        def __init__(self, _repo: Path) -> None:
+            pass
+
+        def index_repository(self) -> int:
+            return 0
+
+    def fake_run_qa_agents(state: WorkflowState, **kwargs: object) -> WorkflowState:
+        state.test_run_report = {"status": "passed"}
+        state.coverage_report = {"status": "available", "total_percent": 100}
+        state.final_validation_status = "passed"
+        return state
+
+    def fail_if_llm_called() -> object:
+        raise AssertionError("LLM should not be initialized when generation flags are false")
+
+    monkeypatch.setattr(ar, "GitDiffParser", StubParser)
+    monkeypatch.setattr(ar, "RepositoryIndexer", StubIndexer)
+    monkeypatch.setattr(ar, "run_qa_agents", fake_run_qa_agents)
+    monkeypatch.setattr(cfs, "get_llm_client", fail_if_llm_called)
+
+    state = run_analyze_workflow(
+        tmp_path,
+        base="HEAD",
+        target=None,
+        generate_tests=False,
+        auto_validate_tests=False,
+        run_qa=True,
+    )
+    assert state.pr_summary == "No changed files were detected."
+    assert state.final_validation_status == "passed"

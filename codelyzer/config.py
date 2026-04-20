@@ -1,19 +1,38 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
-from typing import Optional
+
+from dotenv import load_dotenv
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _env_file_paths() -> tuple[Path, Path]:
+    """Repo-root .env then cwd .env (later wins) so `codelyzer analyze /other/repo` can use a stable config."""
+    return _REPO_ROOT / ".env", Path.cwd() / ".env"
+
+
+# Merge .env into os.environ before Settings() — avoids import-order bugs when other modules import config first.
+load_dotenv(_REPO_ROOT / ".env", override=False)
+load_dotenv(Path.cwd() / ".env", override=True)
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_env_file_paths(),
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
-    # LLM Configuration
+    # LLM Configuration (local Ollama)
     ollama_base_url: str = "http://localhost:11434"
     ollama_api_key: str = ""
     ollama_model: str = "gemma4"
+
+    # Ollama Cloud (https://ollama.com/api) — used for chat/structured LLM when enabled.
+    # Embeddings / `codelyzer index` still use ollama_base_url unless you change that separately.
+    ollama_use_cloud: bool = False
+    ollama_cloud_base_url: str = "https://ollama.com"
+    ollama_cloud_model: str = "gpt-oss:120b"
 
     # Retrieval Configuration
     chroma_persist_directory: Path = Path.home() / ".cache" / "codelyzer" / "chroma"

@@ -1,17 +1,39 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, TypeVar, Type
+from typing import Dict, Any, TypeVar, Type
+from urllib.parse import urlparse
+
 from pydantic import BaseModel
 from langchain_ollama import ChatOllama
-from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 import subprocess
 import structlog
 
-from codelyzer.config import settings
+from codelyzer.config import Settings, settings
 
 logger = structlog.get_logger(__name__)
 
 T = TypeVar('T', bound=BaseModel)
+
+
+def _ollama_auth_client_kwargs(cfg: Settings) -> dict:
+    """Bearer auth for Ollama Cloud (and compatible hosts). Uses settings field so .env works without relying on os.environ alone."""
+    if not (cfg.ollama_api_key or "").strip():
+        return {}
+    return {"client_kwargs": {"headers": {"Authorization": f"Bearer {cfg.ollama_api_key.strip()}"}}}
+
+
+def _is_ollama_cloud_api_host(url: str | None) -> bool:
+    """True when OLLAMA_BASE_URL points at ollama.com (hosted API); skip local model discovery in that case."""
+    if not (url or "").strip():
+        return False
+    try:
+        u = urlparse(url.strip())
+    except ValueError:
+        return False
+    if (u.scheme or "").lower() != "https":
+        return False
+    host = (u.hostname or "").lower()
+    return host in ("ollama.com", "www.ollama.com")
 
 
 class BaseLLMClient(ABC):
@@ -31,13 +53,59 @@ class BaseLLMClient(ABC):
 
 class OllamaClient(BaseLLMClient):
     def __init__(self):
+        auth_kw = _ollama_auth_client_kwargs(settings)
+        inferred_cloud = _is_ollama_cloud_api_host(settings.ollama_base_url) and not settings.ollama_use_cloud
+
+        if settings.ollama_use_cloud:
+            model_name = settings.ollama_cloud_model
+            base_url = settings.ollama_cloud_base_url.rstrip("/")
+            if not (settings.ollama_api_key or "").strip():
+                logger.warning(
+                    "Ollama Cloud is enabled but ollama_api_key is empty; set OLLAMA_API_KEY "
+                    "or ollama_api_key in .env (https://ollama.com/settings/keys)"
+                )
+            self.model = ChatOllama(
+                model=model_name,
+                base_url=base_url,
+                temperature=0.1,
+                **auth_kw,
+            )
+            logger.info(
+                "Initialized Ollama Cloud LLM client",
+                model=model_name,
+                base_url=base_url,
+            )
+            return
+
+        if inferred_cloud:
+            model_name = settings.ollama_model
+            base_url = settings.ollama_base_url.rstrip("/")
+            if not (settings.ollama_api_key or "").strip():
+                logger.warning(
+                    "OLLAMA_BASE_URL points at ollama.com but ollama_api_key is empty; "
+                    "set OLLAMA_API_KEY (https://ollama.com/settings/keys)"
+                )
+            self.model = ChatOllama(
+                model=model_name,
+                base_url=base_url,
+                temperature=0.1,
+                **auth_kw,
+            )
+            logger.info(
+                "Initialized Ollama Cloud LLM client (from OLLAMA_BASE_URL)",
+                model=model_name,
+                base_url=base_url,
+            )
+            return
+
         selected_model = self._select_available_model(settings.ollama_model)
         self.model = ChatOllama(
             model=selected_model,
             base_url=settings.ollama_base_url,
-            temperature=0.1
+            temperature=0.1,
+            **auth_kw,
         )
-        logger.info("Initialized Ollama LLM client", model=selected_model)
+        logger.info("Initialized Ollama LLM client", model=selected_model, base_url=settings.ollama_base_url)
 
     def _list_local_models(self) -> list[str]:
         try:

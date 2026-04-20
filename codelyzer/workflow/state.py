@@ -20,8 +20,9 @@ class WorkflowState:
     pytest_targets: Optional[list[str]] = None
     #: When True, QA runs ``sys.executable -m pytest`` (no ``.codelyzer_venv``, no pip install).
     use_system_python: bool = False
-    #: Coverage aggregation mode for QA runs: "runtime" (default) or "full_source".
-    coverage_scope: Literal["runtime", "full_source"] = "runtime"
+    #: Coverage aggregation mode for QA runs.
+    #: "runtime" (default), "full_source", or "diff_files" (changed Python files only).
+    coverage_scope: Literal["runtime", "full_source", "diff_files"] = "runtime"
 
     # Intermediate processing data
     raw_diff: Optional[str] = None

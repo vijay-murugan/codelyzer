@@ -13,6 +13,7 @@ from codelyzer.testing.qa_agents import (
     write_qa_markdown_report,
 )
 from codelyzer.workflow.state import GeneratedTest, WorkflowState
+from codelyzer.diff.parser import StructuredDiff, FileDiff
 
 
 def _state(tmp_path: Path) -> WorkflowState:
@@ -166,7 +167,13 @@ def test_detect_pythonpath_override_for_app_layout(tmp_path: Path) -> None:
     assert _detect_pythonpath_override(tmp_path) == "."
 
 
-def test_detect_pythonpath_override_none_without_app_dir(tmp_path: Path) -> None:
+def test_detect_pythonpath_override_for_src_layout(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    assert _detect_pythonpath_override(tmp_path) == "src"
+
+
+def test_detect_pythonpath_override_none_without_app_or_src_dir(tmp_path: Path) -> None:
     assert _detect_pythonpath_override(tmp_path) is None
 
 
@@ -243,3 +250,51 @@ def test_run_test_and_coverage_full_source_adds_cov_config(monkeypatch: pytest.M
     assert "--cov" in seen_cmd
     assert "--cov=app" not in seen_cmd
     assert any(str(arg).startswith("--cov-config=") for arg in seen_cmd)
+
+
+def test_run_test_and_coverage_diff_files_adds_cov_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from codelyzer.testing import qa_agents as qa
+
+    state = WorkflowState(repo_path=tmp_path, base_ref="HEAD", target_ref=None, coverage_scope="diff_files")
+    state.structured_diff = StructuredDiff(
+        base_commit="a",
+        target_commit="b",
+        total_files_changed=1,
+        total_insertions=1,
+        total_deletions=0,
+        files=[FileDiff(file_path=Path("src/mod.py"), change_type="modified", hunks=[])],
+    )
+    seen_cmd: list[str] = []
+    seen_cov_cfg_text: dict[str, str] = {}
+
+    def fake_bootstrap(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "venv_python": "python3",
+            "pythonpath_override": None,
+            "system_python": False,
+        }
+
+    def fake_run(cmd: list[str], **kwargs: object):  # type: ignore[no-untyped-def]
+        seen_cmd[:] = cmd
+        cov_cfg = next((str(arg) for arg in cmd if str(arg).startswith("--cov-config=")), "")
+        if cov_cfg:
+            cfg_path = Path(cov_cfg.split("=", 1)[1])
+            seen_cov_cfg_text["text"] = cfg_path.read_text(encoding="utf-8")
+        return __import__("subprocess").CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="TOTAL 1 0 100%\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(qa, "_bootstrap_test_environment", fake_bootstrap)
+    monkeypatch.setattr(qa.subprocess, "run", fake_run)
+
+    out = run_test_and_coverage(state, cov_target="app", coverage_scope="diff_files")
+    assert out.test_run_report.get("status") == "passed"
+    assert "--cov" in seen_cmd
+    assert "--cov=app" not in seen_cmd
+    cfg_text = seen_cov_cfg_text.get("text", "")
+    assert "include =" in cfg_text
+    assert str((tmp_path / "src/mod.py").resolve()) in cfg_text

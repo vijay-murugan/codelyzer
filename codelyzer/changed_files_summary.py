@@ -112,16 +112,17 @@ def fallback_file_summary(file_diff, error_message: str) -> tuple[str, str, str]
     return what_changed, why_changed, what_it_does
 
 
-def render_changed_files_summary(structured_diff) -> str:
+def render_changed_files_summary(structured_diff, *, use_llm: bool = True) -> str:
     if not structured_diff or not structured_diff.files:
         return "No changed files were detected."
     max_files = max(1, settings.summary_max_files)
     max_chars_per_file = max(500, settings.summary_max_chars_per_file)
     llm = None
-    try:
-        llm = get_llm_client()
-    except Exception as exc:
-        logger.warning("LLM client unavailable, using per-file fallback summaries", error=str(exc))
+    if use_llm:
+        try:
+            llm = get_llm_client()
+        except Exception as exc:
+            logger.warning("LLM client unavailable, using per-file fallback summaries", error=str(exc))
 
     lines: list[str] = []
     for file_diff in structured_diff.files[:max_files]:
