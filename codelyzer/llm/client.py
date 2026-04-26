@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from langchain_ollama import ChatOllama
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+import os
 import subprocess
 import structlog
 
@@ -93,6 +94,41 @@ class OllamaClient(BaseLLMClient):
         return result.content
 
 
+class GroqClient(BaseLLMClient):
+    """LLM client using Groq cloud API — used in CI/GitHub Actions."""
+
+    def __init__(self):
+        from langchain_groq import ChatGroq
+
+        api_key = os.environ.get("GROQ_API_KEY", settings.ollama_api_key)
+        model_name = os.environ.get("GROQ_MODEL", settings.groq_model)
+
+        self.model = ChatGroq(
+            model=model_name,
+            api_key=api_key,
+            temperature=0.1,
+        )
+        logger.info("Initialized Groq LLM client", model=model_name)
+
+    def generate_structured(self, prompt: ChatPromptTemplate, input_vars: Dict[str, Any],
+                           output_schema: Type[T]) -> T:
+        chain = prompt | self.model.with_structured_output(output_schema)
+        return chain.invoke(input_vars)
+
+    def generate_text(self, prompt: ChatPromptTemplate, input_vars: Dict[str, Any]) -> str:
+        chain = prompt | self.model
+        result = chain.invoke(input_vars)
+        return result.content
+
+
 def get_llm_client() -> BaseLLMClient:
-    """Factory function to get configured LLM client."""
+    """Factory function to get configured LLM client.
+
+    Auto-selects Groq when GROQ_API_KEY is set (CI environment),
+    otherwise falls back to local Ollama.
+    """
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    if groq_key:
+        logger.info("GROQ_API_KEY detected, using Groq cloud LLM")
+        return GroqClient()
     return OllamaClient()

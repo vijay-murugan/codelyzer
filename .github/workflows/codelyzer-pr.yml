@@ -1,0 +1,81 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Codelyzer PR Analysis — GitHub Actions Workflow
+#
+# Triggers on every pull request targeting main/develop.
+# Runs codelyzer analysis on the diff between PR base and head, then posts
+# a rich markdown comment on the PR with the results.
+#
+# Required repository secrets:
+#   GROQ_API_KEY  — Groq cloud API key for LLM analysis
+#
+# Optional repository secrets:
+#   GROQ_MODEL    — Override the default model (llama-3.3-70b-versatile)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Codelyzer PR Analysis
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: codelyzer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: 🔬 Codelyzer Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ── Checkout ───────────────────────────────────────────────────────
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Full history needed for git diff
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # ── Python ─────────────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── Install Codelyzer ──────────────────────────────────────────────
+      - name: Install codelyzer
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+          # Groq provider for CI (no local Ollama available)
+          pip install langchain-groq>=0.2.0
+
+      # ── Run Analysis ───────────────────────────────────────────────────
+      - name: Run PR analysis
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL || 'llama-3.3-70b-versatile' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          codelyzer pr-analyze . \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --target "${{ github.event.pull_request.head.sha }}" \
+            --output pr_comment.md \
+            --post-comment
+
+      # ── Upload Comment as Artifact (fallback / debugging) ──────────────
+      - name: Upload PR comment artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codelyzer-pr-comment
+          path: pr_comment.md
+          retention-days: 7

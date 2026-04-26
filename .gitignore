@@ -71,3 +71,4 @@ dmypy.json
 checkpoints/
 *.db
 .env.example
+pr_comment.md

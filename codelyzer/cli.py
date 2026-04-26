@@ -384,6 +384,169 @@ def index(repo_path: Path):
     return 0
 
 
+@cli.command("pr-analyze")
+@click.argument('repo_path', type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option('--base', required=True, help='Base git reference (PR base branch)')
+@click.option('--target', required=True, help='Target git reference (PR head commit)')
+@click.option('--output', type=click.Path(path_type=Path), default=None,
+              help='Write the PR comment markdown to this file')
+@click.option('--generate-tests', is_flag=True, help='Also generate tests (results included in comment)')
+@click.option('--post-comment', is_flag=True, help='Post the comment to a GitHub PR via API')
+@click.option('--github-token', envvar='GITHUB_TOKEN', help='GitHub token for posting comments')
+@click.option('--repo-full-name', envvar='GITHUB_REPOSITORY', help='GitHub repo (owner/name)')
+@click.option('--pr-number', type=int, envvar='PR_NUMBER', help='PR number to comment on')
+def pr_analyze(
+    repo_path: Path,
+    base: str,
+    target: str,
+    output: Path | None,
+    generate_tests: bool,
+    post_comment: bool,
+    github_token: str | None,
+    repo_full_name: str | None,
+    pr_number: int | None,
+):
+    """Run analysis for a pull request and generate a PR comment.
+
+    Designed for CI/GitHub Actions. Runs headless analysis, formats results
+    as a rich GitHub markdown comment, and optionally posts it to the PR.
+    """
+    from codelyzer.pr_comment import format_pr_comment
+
+    click.echo(f"🔬 PR Analysis: {repo_path}")
+    click.echo(f"📌 {base} → {target}")
+
+    # Initialize workflow state
+    state = WorkflowState(
+        repo_path=repo_path,
+        base_ref=base,
+        target_ref=target,
+    )
+
+    # Parse git diff
+    try:
+        parser = GitDiffParser(repo_path)
+        state.structured_diff = parser.parse_diff(base, target)
+        state.pr_summary = _render_changed_files_summary(state.structured_diff)
+        click.echo(f"✅ Parsed diff: {state.structured_diff.total_files_changed} files changed, "
+                   f"+{state.structured_diff.total_insertions} -{state.structured_diff.total_deletions}")
+    except Exception as e:
+        click.echo(f"❌ Failed to parse diff: {e}", err=True)
+        return 1
+
+    # Index repository (best-effort, skip if embedding model unavailable in CI)
+    indexer = None
+    try:
+        click.echo("📚 Indexing repository code...")
+        indexer = RepositoryIndexer(repo_path)
+        chunk_count = indexer.index_repository()
+        click.echo(f"✅ Indexed: {chunk_count} code chunks")
+    except Exception as e:
+        click.echo(f"⚠️  Indexing skipped (OK in CI): {e}")
+        state.add_error(f"Indexing warning: {e}")
+
+    # Find existing tests
+    try:
+        if indexer is not None:
+            for file_diff in (state.structured_diff.files if state.structured_diff else []):
+                tests = indexer.search_tests_for_file(file_diff.file_path)
+                if tests:
+                    state.existing_tests[str(file_diff.file_path)] = tests
+    except Exception as e:
+        state.add_error(f"Test search warning: {e}")
+
+    # Optional: generate tests
+    if generate_tests:
+        click.echo("🧪 Generating unit tests...")
+        state = generate_tests_for_changes(state, indexer=indexer)
+        click.echo(_render_test_generation_report(state))
+
+    # Format the PR comment
+    comment_md = format_pr_comment(
+        state,
+        include_tests=generate_tests,
+        include_qa=False,
+    )
+
+    # Write comment to file
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(comment_md, encoding="utf-8")
+        click.echo(f"📝 Comment written to: {output}")
+    else:
+        # Default output path
+        default_output = repo_path / "pr_comment.md"
+        default_output.write_text(comment_md, encoding="utf-8")
+        click.echo(f"📝 Comment written to: {default_output}")
+
+    # Post to GitHub
+    if post_comment:
+        if not all([github_token, repo_full_name, pr_number]):
+            click.echo("❌ --post-comment requires GITHUB_TOKEN, GITHUB_REPOSITORY, and PR_NUMBER", err=True)
+            return 1
+        try:
+            _post_github_pr_comment(github_token, repo_full_name, pr_number, comment_md)
+            click.echo(f"✅ Comment posted to PR #{pr_number}")
+        except Exception as e:
+            click.echo(f"❌ Failed to post comment: {e}", err=True)
+            return 1
+
+    click.echo("🎉 PR analysis complete!")
+    return 0
+
+
+def _post_github_pr_comment(
+    token: str,
+    repo_full_name: str,
+    pr_number: int,
+    body: str,
+) -> None:
+    """Post or update a comment on a GitHub PR.
+
+    If a previous Codelyzer comment exists, it is updated in-place.
+    Otherwise a new comment is created.
+    """
+    import json
+    import urllib.request
+
+    api_base = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+        "User-Agent": "Codelyzer-Bot",
+    }
+
+    # Check for existing Codelyzer comment to update
+    marker = "## 🔬 Codelyzer Analysis Report"
+    existing_comment_id = None
+
+    try:
+        req = urllib.request.Request(api_base, headers=headers, method="GET")
+        with urllib.request.urlopen(req) as resp:
+            comments = json.loads(resp.read().decode())
+            for comment in comments:
+                if marker in (comment.get("body") or ""):
+                    existing_comment_id = comment["id"]
+                    break
+    except Exception:
+        pass  # If listing fails, just create a new comment
+
+    payload = json.dumps({"body": body}).encode()
+
+    if existing_comment_id:
+        # Update existing comment
+        update_url = f"https://api.github.com/repos/{repo_full_name}/issues/comments/{existing_comment_id}"
+        req = urllib.request.Request(update_url, data=payload, headers=headers, method="PATCH")
+    else:
+        # Create new comment
+        req = urllib.request.Request(api_base, data=payload, headers=headers, method="POST")
+
+    with urllib.request.urlopen(req) as resp:
+        if resp.status not in (200, 201):
+            raise RuntimeError(f"GitHub API returned {resp.status}")
+
+
 def main():
     """CLI entry point."""
     try:
@@ -395,3 +558,4 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
+

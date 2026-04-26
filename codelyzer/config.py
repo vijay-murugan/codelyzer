@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_api_key: str = ""
     ollama_model: str = "gemma4"
+    groq_model: str = "llama-3.3-70b-versatile"
 
     # Retrieval Configuration
     chroma_persist_directory: Path = Path.home() / ".cache" / "codelyzer" / "chroma"
