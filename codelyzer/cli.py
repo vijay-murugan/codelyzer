@@ -434,26 +434,31 @@ def pr_analyze(
         click.echo(f"❌ Failed to parse diff: {e}", err=True)
         return 1
 
-    # Index repository (best-effort, skip if embedding model unavailable in CI)
+    # Index repository — skip entirely in CI (no Ollama for embeddings)
+    import os
     indexer = None
-    try:
-        click.echo("📚 Indexing repository code...")
-        indexer = RepositoryIndexer(repo_path)
-        chunk_count = indexer.index_repository()
-        click.echo(f"✅ Indexed: {chunk_count} code chunks")
-    except Exception as e:
-        click.echo(f"⚠️  Indexing skipped (OK in CI): {e}")
-        state.add_error(f"Indexing warning: {e}")
+    is_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS") or os.environ.get("GROQ_API_KEY"))
 
-    # Find existing tests
-    try:
-        if indexer is not None:
-            for file_diff in (state.structured_diff.files if state.structured_diff else []):
-                tests = indexer.search_tests_for_file(file_diff.file_path)
-                if tests:
-                    state.existing_tests[str(file_diff.file_path)] = tests
-    except Exception as e:
-        state.add_error(f"Test search warning: {e}")
+    if is_ci:
+        click.echo("ℹ️  Skipping repository indexing (CI environment — no Ollama embeddings available)")
+    else:
+        try:
+            click.echo("📚 Indexing repository code...")
+            indexer = RepositoryIndexer(repo_path)
+            chunk_count = indexer.index_repository()
+            click.echo(f"✅ Indexed: {chunk_count} code chunks")
+        except Exception as e:
+            click.echo(f"⚠️  Indexing skipped: {e}")
+
+        # Find existing tests (only if indexer is available)
+        try:
+            if indexer is not None:
+                for file_diff in (state.structured_diff.files if state.structured_diff else []):
+                    tests = indexer.search_tests_for_file(file_diff.file_path)
+                    if tests:
+                        state.existing_tests[str(file_diff.file_path)] = tests
+        except Exception as e:
+            click.echo(f"⚠️  Test search skipped: {e}")
 
     # Optional: generate tests
     if generate_tests:
